@@ -1,0 +1,192 @@
+package collect
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func writeLeaf(t *testing.T, path, cn string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeKey(t *testing.T, path string) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalECPrivateKey(key)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func collectIn(t *testing.T, root string) Result {
+	t.Helper()
+	c := &FS{Bounds: Bounds{Roots: []string{root}}}
+	return c.Collect(context.Background())
+}
+
+func TestFindsACertificateAndItsSiblingKeyWithoutReadingIt(t *testing.T) {
+	dir := t.TempDir()
+	writeLeaf(t, filepath.Join(dir, "site.pem"), "www.example.com")
+	writeKey(t, filepath.Join(dir, "site.key"))
+
+	res := collectIn(t, dir)
+
+	if len(res.Observations) != 1 {
+		t.Fatalf("want 1 observation, got %d", len(res.Observations))
+	}
+	obs := res.Observations[0]
+	if !obs.PrivateKeyPresent {
+		t.Error("the sibling key must be reported as present")
+	}
+	if !strings.HasSuffix(obs.PrivateKeyLocation, "site.key") {
+		t.Errorf("key location = %q", obs.PrivateKeyLocation)
+	}
+	// THE POINT: its path, never its contents.
+	if strings.Contains(obs.CertificatePEM, "PRIVATE") || strings.Contains(obs.ChainPEM, "PRIVATE") {
+		t.Fatal("key material leaked into the observation")
+	}
+	if !res.Completed {
+		t.Error("a clean sweep must report Completed")
+	}
+}
+
+func TestFindsLetsEncryptLayout(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live", "example.com")
+	writeLeaf(t, filepath.Join(live, "fullchain.pem"), "example.com")
+	writeKey(t, filepath.Join(live, "privkey.pem"))
+
+	res := collectIn(t, dir)
+
+	if len(res.Observations) != 1 {
+		t.Fatalf("want 1 observation, got %d", len(res.Observations))
+	}
+	if !strings.HasSuffix(res.Observations[0].PrivateKeyLocation, "privkey.pem") {
+		t.Errorf("did not pair fullchain.pem with privkey.pem: %q", res.Observations[0].PrivateKeyLocation)
+	}
+}
+
+// A file that is not a certificate is not an error — a host is full of them,
+// and reporting each as a collector failure would make every run look broken
+// AND stop absence detection working.
+func TestNonCertificateFilesAreSilentlySkipped(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "nginx.pem"), []byte("server { listen 443; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectIn(t, dir)
+
+	if len(res.Observations) != 0 || len(res.Errors) != 0 {
+		t.Fatalf("observations=%d errors=%d, want none of either", len(res.Observations), len(res.Errors))
+	}
+	if !res.Completed {
+		t.Error("skipping a non-certificate file must not mark the sweep incomplete")
+	}
+}
+
+// A root that does not exist on this host is not a failure. Most hosts have
+// neither /etc/apache2 nor /etc/httpd, and treating the absent one as an error
+// would mark every sweep incomplete — which would in turn stop DTP ever
+// concluding a certificate had been removed.
+func TestAnAbsentRootIsNotAFailure(t *testing.T) {
+	res := collectIn(t, filepath.Join(t.TempDir(), "definitely-not-here"))
+
+	if len(res.Errors) != 0 {
+		t.Errorf("want no errors, got %v", res.Errors)
+	}
+	if !res.Completed {
+		t.Error("an absent root must leave the sweep complete")
+	}
+}
+
+func TestOversizedFilesAreNotRead(t *testing.T) {
+	dir := t.TempDir()
+	writeLeaf(t, filepath.Join(dir, "big.pem"), "big.example.com")
+
+	c := &FS{Bounds: Bounds{Roots: []string{dir}, MaxFileBytes: 16}}
+	res := c.Collect(context.Background())
+
+	if len(res.Observations) != 0 {
+		t.Fatal("a file past the size bound must not be opened")
+	}
+}
+
+func TestDepthIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	deep := filepath.Join(dir, "a", "b", "c", "d", "e")
+	writeLeaf(t, filepath.Join(deep, "deep.pem"), "deep.example.com")
+
+	c := &FS{Bounds: Bounds{Roots: []string{dir}, MaxDepth: 2}}
+	res := c.Collect(context.Background())
+
+	if len(res.Observations) != 0 {
+		t.Fatalf("walked past the depth bound: %d observations", len(res.Observations))
+	}
+}
+
+// A certificate and its key in ONE file (the haproxy layout). The certificate is
+// still reported; the key is recorded as living in that same path.
+func TestCombinedFileReportsTheCertificateAndFlagsTheKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "combined.pem")
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "haproxy.example.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+
+	combined := append(
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...)
+	if err := os.WriteFile(path, combined, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectIn(t, dir)
+
+	if len(res.Observations) != 1 {
+		t.Fatalf("want 1 observation, got %d", len(res.Observations))
+	}
+	obs := res.Observations[0]
+	if obs.PrivateKeyLocation != path {
+		t.Errorf("key location = %q, want the combined file itself", obs.PrivateKeyLocation)
+	}
+	if strings.Contains(obs.CertificatePEM, "PRIVATE") {
+		t.Fatal("key material leaked into the observation")
+	}
+}

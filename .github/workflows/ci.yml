@@ -1,0 +1,61 @@
+name: CI
+
+# This repo checks out ONLY itself. The agent deliberately has no dependency on
+# the DTP engines — it speaks the protocol over HTTP — so there are no sibling
+# checkouts here and no ENGINES_READ_TOKEN to provision.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          [ -z "$unformatted" ] || { echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1; }
+
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  # The agent ships as one static binary per platform, and a member's host is
+  # not this runner. Cross-compiling every target on every change is what stops
+  # a Unix-only syscall reaching main and breaking the Windows build at release
+  # time instead of here.
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # No cgo: a binary that links the host's libc is not the single
+          # portable artefact this is supposed to be, and it would pick up a
+          # glibc version requirement from whatever built it.
+          CGO_ENABLED: '0'
+        run: go build -ldflags "-s -w" -o /dev/null ./cmd/dtp-agent
