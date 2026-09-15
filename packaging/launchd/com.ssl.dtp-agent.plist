@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ssl.dtp-agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/dtp-agent</string>
+    <string>run</string>
+  </array>
+
+  <!-- Hourly, matching the systemd timer. launchd has no randomised delay, so
+       a fleet of Macs installed from one image will align; that is tolerable
+       at the scale macOS appears in a server estate, and the server platforms
+       that arrive in hundreds are the ones with the jitter. -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Background priority: this walks the disk on someone's machine. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/dtp-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/dtp-agent.log</string>
+</dict>
+</plist>

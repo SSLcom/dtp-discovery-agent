@@ -1,0 +1,65 @@
+# .deb and .rpm, built with nfpm (https://nfpm.goreleaser.com).
+#
+# Linux servers are where this agent mostly lives, so a native package matters
+# more than the tarball: it puts the systemd units in place, survives an
+# upgrade, and can be removed cleanly by whatever already manages the host.
+#
+# ENROLMENT IS NOT PART OF INSTALLATION. The package installs the binary and a
+# STOPPED timer; a member enrols and then starts it. Installing something that
+# immediately begins reporting to a service the operator has not yet configured
+# would be the wrong default even if it worked — and it cannot work, because it
+# has no account id or token until someone supplies one.
+name: dtp-agent
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: SSL.com <support@ssl.com>
+description: |
+  DTP certificate discovery agent.
+  Inventories the certificates installed on this host and reports them to the
+  Digital Trust Platform. Read-only: it never reads a private key, installs
+  nothing, and modifies no file.
+vendor: SSL.com
+homepage: https://github.com/SSLcom/dtp-discovery-agent
+license: MIT
+
+contents:
+  # A FIXED path, not build/stage/linux_${ARCH}/…: nfpm expands environment
+  # variables in some fields but not in contents.src, so a templated source
+  # path fails as an unmatched glob. build-packages.sh copies the right
+  # architecture's binary here before each invocation.
+  - src: ./build/pkg/dtp-agent
+    dst: /usr/bin/dtp-agent
+    file_info:
+      mode: 0755
+
+  - src: ./packaging/systemd/dtp-agent.service
+    dst: /lib/systemd/system/dtp-agent.service
+    file_info:
+      mode: 0644
+
+  - src: ./packaging/systemd/dtp-agent.timer
+    dst: /lib/systemd/system/dtp-agent.timer
+    file_info:
+      mode: 0644
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/dtp-agent/LICENSE
+    file_info:
+      mode: 0644
+
+  # 0700, and owned by root: it holds this agent's private key. Declared here
+  # so the directory exists with the right mode before the agent ever runs,
+  # rather than depending on the binary to correct it afterwards.
+  - dst: /var/lib/dtp-agent
+    type: dir
+    file_info:
+      mode: 0700
+      owner: root
+      group: root
+
+scripts:
+  postinstall: ./packaging/scripts/postinstall.sh
+  preremove: ./packaging/scripts/preremove.sh

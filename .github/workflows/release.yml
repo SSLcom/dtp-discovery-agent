@@ -1,0 +1,103 @@
+name: Release
+
+# Cut a release by pushing a tag:
+#
+#   git tag -a v0.1.0 -m "…" && git push origin v0.1.0
+#
+# Everything of substance lives in script/build-release.sh and
+# script/build-packages.sh, which run identically on a laptop. Release logic
+# that exists only in YAML can be exercised only by cutting a release, which
+# means it is first tested in the moment it matters most.
+on:
+  push:
+    tags: [ 'v*' ]
+  # Dry run: build and check every artefact, publish nothing.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build (no leading v)
+        required: true
+        default: 0.0.0-dev
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release
+      id-token: write      # keyless signing for the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version"
+
+      # The gate before anything is published. A release built from a tree whose
+      # tests do not pass is worse than no release: it is downloadable.
+      - run: go test -race ./...
+
+      - name: Build archives
+        run: script/build-release.sh "${{ steps.version.outputs.version }}"
+
+      # THE REPRODUCIBILITY CLAIM, ENFORCED RATHER THAN DOCUMENTED. The build is
+      # meant to be byte-stable so anyone can rebuild a published tag and check
+      # the checksums themselves — a property that is worth nothing if it
+      # quietly stops holding. Building twice and diffing is the only way to
+      # know it still does.
+      - name: Build is reproducible
+        run: |
+          cp dist/SHA256SUMS /tmp/first-pass.txt
+          script/build-release.sh "${{ steps.version.outputs.version }}" >/dev/null
+          if ! diff -u /tmp/first-pass.txt dist/SHA256SUMS; then
+            echo "::error::two builds of this commit produced different artefacts"
+            exit 1
+          fi
+          echo "Byte-identical across two builds."
+
+      # nfpm runs from its PINNED container image — the same path the script
+      # takes on a laptop, so local and CI packaging cannot drift. Also avoids
+      # fetching a release binary here, which would need its own checksum
+      # pinned and kept correct; the image digest is the pin.
+      - name: Build packages
+        run: script/build-packages.sh "${{ steps.version.outputs.version }}"
+
+      # GitHub-native build provenance: a signed statement of which workflow,
+      # from which commit, produced these exact bytes. Keyless, so there is no
+      # signing key for us to lose or leak — which is the failure mode of every
+      # release-signing scheme that depends on one.
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'dist/*'
+
+      - name: Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtp-agent-${{ steps.version.outputs.version }}
+          path: dist/
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag
