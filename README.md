@@ -80,6 +80,73 @@ repeating because dropping either changes behaviour and raises no error:
 
 Both are asserted in `internal/transport`.
 
+## Installing
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SSLcom/dtp-discovery-agent/main/install.sh | sh
+```
+
+**The installer verifies the checksum and refuses to proceed without one.** If
+`SHA256SUMS` cannot be fetched, does not list your archive, or does not match,
+nothing is installed. It is on GitHub so you can read it before running it —
+and if piping a script into a shell is not for you, the manual path is below and
+is what the script does anyway.
+
+On Debian/Ubuntu or RHEL/Fedora, prefer the package: it places the systemd units
+and survives upgrades.
+
+```sh
+# Verify, then install.
+curl -fsSLO https://github.com/SSLcom/dtp-discovery-agent/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/SSLcom/dtp-discovery-agent/releases/latest/download/dtp-agent_VERSION_amd64.deb
+sha256sum -c --ignore-missing SHA256SUMS
+sudo dpkg -i dtp-agent_VERSION_amd64.deb
+```
+
+Installing is not enrolling: the package leaves the timer **stopped**, because
+the agent has no account or token until you give it one.
+
+```sh
+sudo dtp-agent enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
+sudo systemctl enable --now dtp-agent.timer
+```
+
+The timer runs hourly with a randomised delay of up to fifteen minutes, so a
+fleet installed from one image does not arrive at DTP all at once. The service
+unit runs the scan at idle IO and CPU priority under `ProtectSystem=strict`,
+with the state directory as its only writable path.
+
+**Every release is reproducible.** The archives are built with `-trimpath`,
+sorted entries and a fixed mtime, so you can rebuild a tag yourself and compare:
+
+```sh
+git checkout v1.2.3 && script/build-release.sh 1.2.3 && cat dist/SHA256SUMS
+```
+
+CI enforces this by building twice and diffing, and each release also carries a
+GitHub build-provenance attestation — a signed statement of which workflow, from
+which commit, produced those exact bytes:
+
+```sh
+gh attestation verify dtp-agent_1.2.3_linux_amd64.tar.gz --repo SSLcom/dtp-discovery-agent
+```
+
+## Releasing
+
+```sh
+git tag -a v1.2.3 -m "…" && git push origin v1.2.3
+```
+
+The workflow is a thin wrapper over scripts that run identically on a laptop, so
+the release path is exercised on every change rather than only when a tag is
+pushed:
+
+```sh
+script/build-release.sh 1.2.3    # archives + checksums for all six targets
+script/build-packages.sh 1.2.3   # .deb and .rpm, via a digest-pinned nfpm image
+script/test-install.sh 1.2.3     # install.sh accepts what it should, refuses what it should not
+```
+
 ## Development
 
 ```sh
@@ -105,6 +172,11 @@ the server's `AgentCommand` shape, not built.
 Collectors shipped: filesystem. Planned: local listener probe, nginx/Apache/IIS
 config parsing, OS and application trust stores (Windows store, macOS keychain,
 NSS, Java keystores).
+
+Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
+systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service
+wrapper (which needs the binary to speak the service control protocol), and a
+Homebrew tap.
 
 ## License
 

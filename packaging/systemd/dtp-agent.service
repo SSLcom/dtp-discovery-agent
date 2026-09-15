@@ -1,0 +1,55 @@
+[Unit]
+Description=DTP certificate discovery agent
+Documentation=https://github.com/SSLcom/dtp-discovery-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/dtp-agent run
+
+# RUNS AS ROOT, AND THAT IS NOT INCIDENTAL: the certificates worth finding sit
+# in /etc/ssl and /etc/letsencrypt, which an unprivileged user cannot read. So
+# the privilege is narrowed with everything systemd offers instead.
+User=root
+
+# READ-ONLY. The agent has no write path compiled in; this makes that true of
+# the process as well, so a future bug cannot become a modified host. The state
+# directory is the single exception it is allowed to write.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dtp-agent
+StateDirectory=dtp-agent
+StateDirectoryMode=0700
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount
+
+# Outbound HTTPS to DTP and nothing else it could reach by accident.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# The scan walks a customer's disk. Keep it off the back of anything that
+# matters on that machine — this is a background inventory, not a workload.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+
+# A scan that hangs must not hold the timer's next run off forever.
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

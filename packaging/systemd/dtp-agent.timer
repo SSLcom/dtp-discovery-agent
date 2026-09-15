@@ -1,0 +1,22 @@
+[Unit]
+Description=Run the DTP certificate discovery agent periodically
+Documentation=https://github.com/SSLcom/dtp-discovery-agent
+
+[Timer]
+# Hourly. A certificate inventory that is a day stale is a portfolio that can
+# be confidently wrong, which is worse than one that is visibly unknown — and
+# the agent's own detail page reports a host as stale after 24 hours, so the
+# default cadence has to sit comfortably inside that.
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+# SPREAD THE FLEET. Without this every machine installed from one image scans
+# on the same second, and a 500-server rollout arrives at DTP as a thundering
+# herd once an hour, every hour, forever.
+RandomizedDelaySec=15min
+
+# A machine that was switched off does not skip its turn silently.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

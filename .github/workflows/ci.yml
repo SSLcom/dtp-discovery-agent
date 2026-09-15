@@ -29,6 +29,52 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  # The release path, exercised on every change rather than only when a tag is
+  # pushed. A release pipeline whose first real run is the release itself is one
+  # nobody has tested — and this one produces the artefacts that land on
+  # customers' servers.
+  release-path:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build every artefact
+        run: script/build-release.sh 0.0.0-ci
+
+      # The build is meant to be byte-stable so anyone can rebuild a published
+      # tag and check the checksums themselves. That is worth nothing if it
+      # quietly stops holding, and building twice is the only way to know.
+      - name: Build is reproducible
+        run: |
+          cp dist/SHA256SUMS /tmp/first-pass.txt
+          script/build-release.sh 0.0.0-ci >/dev/null
+          diff -u /tmp/first-pass.txt dist/SHA256SUMS
+
+      - name: Packages
+        run: script/build-packages.sh 0.0.0-ci
+
+      # The installer's REFUSALS are the part worth testing. One that verifies
+      # on the happy path and waves everything else through has the security
+      # properties of one that does not verify at all.
+      - name: Installer accepts what it should and refuses what it should not
+        run: script/test-install.sh 0.0.0-ci
+
+      # The .deb has to install on a machine that is not this runner, with the
+      # state directory that holds the agent's private key at 0700.
+      - name: Package installs cleanly
+        run: |
+          docker run --rm -v "$PWD/dist":/d:ro debian:bookworm-slim bash -c '
+            set -e
+            dpkg -i /d/dtp-agent_0.0.0-ci_amd64.deb >/dev/null
+            dtp-agent version
+            mode=$(stat -c %a /var/lib/dtp-agent)
+            [ "$mode" = 700 ] || { echo "state dir is $mode, want 700"; exit 1; }
+          '
+
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops
   # a Unix-only syscall reaching main and breaking the Windows build at release
