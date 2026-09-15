@@ -190,3 +190,41 @@ func TestCombinedFileReportsTheCertificateAndFlagsTheKey(t *testing.T) {
 		t.Fatal("key material leaked into the observation")
 	}
 }
+
+// The mode is reported so a member can see that a key beside a certificate is
+// world-readable. `Perm().String()` is ls-style text ("-rw-r--r--"), not octal,
+// so the obvious-looking formatting produced "0rw-r--r--" — a value that is not
+// a mode at all and that no one reading the portfolio could act on.
+func TestFileModeIsReportedAsOctal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "site.pem")
+	writeLeaf(t, path, "mode.example.com")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectIn(t, dir)
+	if len(res.Observations) != 1 {
+		t.Fatalf("want 1 observation, got %d", len(res.Observations))
+	}
+	if got := res.Observations[0].FileMode; got != "0644" {
+		t.Errorf("file mode = %q, want %q", got, "0644")
+	}
+}
+
+func TestFileModeReportsATightenedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tight.pem")
+	writeLeaf(t, path, "tight.example.com")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectIn(t, dir)
+	if len(res.Observations) != 1 {
+		t.Fatalf("want 1 observation, got %d", len(res.Observations))
+	}
+	if got := res.Observations[0].FileMode; got != "0600" {
+		t.Errorf("file mode = %q, want %q", got, "0600")
+	}
+}

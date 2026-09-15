@@ -163,3 +163,41 @@ func TestNoLastRunIsNotAnError(t *testing.T) {
 		t.Errorf("want nil for an agent that has never run, got %+v", last)
 	}
 }
+
+// The directory is re-secured on every Open; the KEY was only secured when this
+// binary created it. A key restored from a backup, laid down by a package, or
+// written by an older version keeps whatever mode it arrived with — and the
+// agent would go on using it, and re-securing the directory around it, while
+// the private key itself stayed world-readable.
+func TestAnExistingLooseKeyIsTightenedOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadOrCreateKey(); err != nil {
+		t.Fatal(err)
+	}
+
+	keyPath := filepath.Join(dir, "agent.key")
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later run, as a service restart would be.
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.LoadOrCreateKey(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("agent.key mode = %o after load, want 600", perm)
+	}
+}

@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"crypto/x509"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -207,8 +208,15 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result) {
 	})
 }
 
+// fileMode renders the permission bits as the octal a member expects: "0644".
+//
+// NOT via Perm().String(), which is ls-style text ("-rw-r--r--") — prefixing
+// that with "0" yields "0rw-r--r--", a value that is not a mode at all and that
+// nobody reading the portfolio could act on. The whole reason the mode is
+// reported is so a world-readable key beside a certificate is visible, and a
+// string that cannot be compared against 0600 defeats it.
 func fileMode(info fs.FileInfo) string {
-	return "0" + strings.TrimPrefix(info.Mode().Perm().String(), "-")
+	return fmt.Sprintf("%04o", info.Mode().Perm())
 }
 
 // siblingKey looks for the conventional key beside a certificate — site.pem

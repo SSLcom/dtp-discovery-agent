@@ -81,8 +81,8 @@ func Open(dir string) (*Store, error) {
 	// this agent's private key world-readable forever. Tightened on every open
 	// rather than only at creation, because the directory outlives any one
 	// version of this binary.
-	if err := os.Chmod(dir, dirPerm); err != nil {
-		return nil, fmt.Errorf("securing state directory %s: %w", dir, err)
+	if err := secure(dir, dirPerm); err != nil {
+		return nil, err
 	}
 	return &Store{dir: dir}, nil
 }
@@ -106,6 +106,16 @@ func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	raw, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		// TIGHTENED ON EVERY LOAD, not only at creation. A key restored from a
+		// backup, laid down by a configuration-management tool, or written by
+		// an older version of this binary arrives with whatever mode it
+		// arrives with — and the agent would go on using it, re-securing the
+		// directory around it, while the private key itself stayed
+		// world-readable. Same reasoning as the directory in Open; the file
+		// needs it for the same reason.
+		if err := secure(path, keyPerm); err != nil {
+			return nil, err
+		}
 		return parseKey(raw)
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -128,10 +138,32 @@ func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	if err := os.WriteFile(path, encoded, keyPerm); err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := os.Chmod(path, keyPerm); err != nil {
-		return nil, fmt.Errorf("chmod %s: %w", path, err)
+	if err := secure(path, keyPerm); err != nil {
+		return nil, err
 	}
 	return key, nil
+}
+
+// secure narrows a path's permissions to exactly `want`, and says which path it
+// was if it cannot. Only ever tightens — the modes it is called with are the
+// tightest the agent uses.
+//
+// ON WINDOWS THIS IS ALL BUT A NO-OP, and that is not a gap being hidden:
+// os.Chmod there controls only the read-only attribute, and access is decided
+// by the ACL. The call is harmless and the guarantee simply is not a POSIX mode
+// on that platform — which is also why fileOwner reports nothing there.
+func secure(path string, want os.FileMode) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if info.Mode().Perm() == want {
+		return nil
+	}
+	if err := os.Chmod(path, want); err != nil {
+		return fmt.Errorf("securing %s: %w", path, err)
+	}
+	return nil
 }
 
 func parseKey(raw []byte) (*ecdsa.PrivateKey, error) {
