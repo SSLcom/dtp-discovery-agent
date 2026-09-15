@@ -65,27 +65,18 @@ jobs:
 
       # The .deb has to install on a machine that is not this runner, with the
       # state directory that holds the agent's private key at 0700.
-      - name: Package installs cleanly
-        run: |
-          set -euo pipefail
-          # Found by name, NOT assumed: nfpm rewrites a pre-release version into
-          # Debian's own spelling — "0.0.0-ci" becomes "0.0.0~ci", which sorts
-          # BEFORE 0.0.0 as a pre-release should. Hardcoding the filename here
-          # was wrong for exactly that reason, and this job is where it showed.
-          shopt -s nullglob
-          debs=(dist/*_amd64.deb)
-          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one amd64 .deb, found ${#debs[@]}"; exit 1; }
-          echo "installing ${debs[0]}"
+      # The maintainer scripts' decision logic, with systemctl stubbed. Debian's
+      # prerm and RPM's %preun BOTH run on upgrade as well as removal, so a
+      # script that disables unconditionally stops an enrolled fleet reporting
+      # on a routine `apt upgrade` — and nothing errors.
+      - name: Maintainer scripts disable only on removal
+        run: script/test-package-scripts.sh
 
-          docker run --rm -v "$PWD/dist":/d:ro -e DEB="$(basename "${debs[0]}")" \
-            debian:bookworm-slim bash -c '
-              set -e
-              dpkg -i "/d/$DEB" >/dev/null
-              dtp-agent version
-              mode=$(stat -c %a /var/lib/dtp-agent)
-              [ "$mode" = 700 ] || { echo "state dir is $mode, want 700"; exit 1; }
-              echo "state dir 0700, binary runs"
-            '
+      # The same question put to REAL dpkg, because the bug above was a wrong
+      # belief about which arguments dpkg passes. Also checks the approved
+      # keypair survives removal and the state directory lands at 0700.
+      - name: Package survives an upgrade and keeps the agent's identity
+        run: script/test-package-lifecycle.sh 0.0.0-ci
 
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops
