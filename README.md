@@ -1,0 +1,111 @@
+# dtp-discovery-agent
+
+The certificate **discovery agent** for the Digital Trust Platform: a single
+static binary a member installs on their own servers. It inventories every
+certificate it can find and reports what it found to DTP, so an account can
+answer the question DTP could not answer before — *what certificates are
+installed on my machines, and which of them are about to break something?*
+
+The server half is [`SSLcom/dtp-discovery`](https://github.com/SSLcom/dtp-discovery).
+
+## Two properties everything else follows from
+
+**This agent holds its own key, and DTP never sees it.** It generates a P-256
+keypair on first run and sends only the public half; every later request is
+authenticated by a detached signature over an assertion. DTP stores no secret
+for this agent, so revoking it is a status flip on the server rather than a
+rotation here, and a dump of the server's tables grants nobody anything.
+
+**It never transmits private key material.** That is enforced three times over,
+because it is the one failure that cannot be walked back:
+
+1. `collect.Observation` has no field for key bytes. The agent records *that* a
+   key sits beside a certificate and *where* — an operator needs to know a key
+   exists and is mode 0644 — but the bytes are never read into the struct.
+2. `parse` re-encodes certificates from their parsed DER rather than slicing
+   bytes out of the file, so a combined key+certificate file (the haproxy
+   layout) yields the certificate and nothing else.
+3. `transport` runs every outbound body past a guard and refuses locally. It
+   should never fire; the server refuses such a payload too, but by then it has
+   crossed the network.
+
+## Commands
+
+```
+dtp-agent enroll --server URL --account ID [--token TOKEN] [--root DIR]
+dtp-agent scan [--root DIR] [--json]     # print findings, upload nothing
+dtp-agent run [--once] [--root DIR]      # scan and upload
+dtp-agent status                         # what this agent is and last did
+dtp-agent version
+```
+
+`scan` is the one to reach for first: it shows exactly what the agent *would*
+report without letting it report anything.
+
+**Enrolling waits, it does not fail.** An agent lands `pending` and a member
+holding `discovery:registrations:approve` admits it. Running the installer
+before anyone has clicked approve is the normal case in a rollout, so `run`
+waits and retries; `--once` is for a cron job that should not hold a process
+open.
+
+## What it scans
+
+Bounded by default, because this runs unattended on machines nobody is
+watching. The defaults cover the usual TLS locations (`/etc/ssl`, `/etc/pki`,
+`/etc/nginx`, `/etc/letsencrypt`, …), cap files at 1 MiB and depth at 8, do not
+follow symlinks, and only open files whose extension suggests a certificate.
+A host with an unusual layout adds `--root` rather than the agent widening its
+sweep — an agent that walks `/` on a machine with an NFS mount is the incident
+this product exists to prevent.
+
+Recognised today: PEM and DER certificate files, and PKCS#12 bundles with an
+empty password. The agent never guesses at a password.
+
+## The protocol, and the two fields that fail silently
+
+Full description in the server's README. Two client obligations are worth
+repeating because dropping either changes behaviour and raises no error:
+
+- **`X-DTP-Agent-Fingerprint` on `/discovery/v1/token`.** Nothing on the server
+  reads it; the host's rate limiter does, because middleware cannot parse a
+  JSON body. An agent that omits it still authenticates and joins the shared
+  per-IP bucket with every other agent behind the same address — which, for a
+  fleet inside one customer's network, is all of them.
+- **`completed_sources` on the final inventory page.** It names the collectors
+  that finished cleanly, and it is the only thing that lets DTP conclude a
+  certificate is no longer deployed. A collector that hit a permission error saw
+  certificates it *could not see*, not certificates that were removed, so it is
+  omitted — and the failure mode of omitting it is an inventory that never
+  shrinks rather than certificates that wrongly vanish.
+
+Both are asserted in `internal/transport`.
+
+## Development
+
+```sh
+go test ./...
+go vet ./...
+go build -ldflags "-X main.Version=$(git describe --tags --always)" ./cmd/dtp-agent
+```
+
+Against a local DTP:
+
+```sh
+dtp-agent enroll --server http://localhost:3000 --account <uuid> --token dtpd_… \
+  --root ./testdata --state /tmp/agent-state
+dtp-agent run --once --state /tmp/agent-state
+```
+
+## Status
+
+**v1 is read-only.** No write path is compiled in. Installing certificates,
+generating a CSR on the host, and the command queue are v2 — designed for in
+the server's `AgentCommand` shape, not built.
+
+Collectors shipped: filesystem. Planned: local listener probe, nginx/Apache/IIS
+config parsing, OS and application trust stores (Windows store, macOS keychain,
+NSS, Java keystores).
+
+## License
+
+MIT.
