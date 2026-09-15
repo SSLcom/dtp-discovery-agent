@@ -6,7 +6,7 @@ certificate it can find and reports what it found to DTP, so an account can
 answer the question DTP could not answer before — *what certificates are
 installed on my machines, and which of them are about to break something?*
 
-The server half is [`SSLcom/dtp-discovery`](https://github.com/SSLcom/dtp-discovery).
+The server half is the `dtp-discovery` engine inside the Digital Trust Platform, which is not public.
 
 ## Two properties everything else follows from
 
@@ -123,16 +123,22 @@ sorted entries and a fixed mtime, so you can rebuild a tag yourself and compare:
 git checkout v1.2.3 && script/build-release.sh 1.2.3 && cat dist/SHA256SUMS
 ```
 
-CI enforces this by building twice and diffing. Rebuilding the tag yourself and
-comparing checksums is the verification path that depends on trusting nobody.
+CI enforces this by building twice and diffing, and it holds across machines —
+a local rebuild of v0.1.0 matched the published archives byte for byte.
+Rebuilding the tag yourself is the verification path that depends on trusting
+nobody.
 
-Releases do **not** currently carry a GitHub build-provenance attestation:
-`actions/attest-build-provenance` is unavailable for private repositories in an
-organization without the plan for it. The step is present but commented out in
-`.github/workflows/release.yml`, with the reason, so it can be switched on the
-day that changes — running it and ignoring failures would be worse than not
-running it, because the release would then advertise a provenance chain that is
-not there.
+Releases **after v0.1.0** also carry a GitHub build-provenance attestation — a
+signed statement of which workflow, from which commit, produced those exact
+bytes:
+
+```sh
+gh attestation verify dtp-agent_1.2.3_linux_amd64.tar.gz --repo SSLcom/dtp-discovery-agent
+```
+
+v0.1.0 has none: the repository was private when it was cut, and
+`actions/attest-build-provenance` is unavailable to private repositories on this
+plan. Its checksums and reproducible build stand on their own.
 
 ## Releasing
 
