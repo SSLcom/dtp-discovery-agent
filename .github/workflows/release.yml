@@ -27,8 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write      # create the release
-      id-token: write      # keyless signing for the provenance attestation
-      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -81,14 +79,24 @@ jobs:
       - name: Build packages
         run: script/build-packages.sh "${{ steps.version.outputs.version }}"
 
-      # GitHub-native build provenance: a signed statement of which workflow,
-      # from which commit, produced these exact bytes. Keyless, so there is no
-      # signing key for us to lose or leak — which is the failure mode of every
-      # release-signing scheme that depends on one.
-      - name: Attest provenance
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-path: 'dist/*'
+      # BUILD PROVENANCE IS NOT PRODUCED, and this is where it would go.
+      #
+      # actions/attest-build-provenance refuses on a private repository in an
+      # organization without the plan for it: "Feature not available for the
+      # SSLcom organization. To enable this feature, please upgrade the billing
+      # plan, or make this repository public."
+      #
+      # Left commented rather than left running-and-ignored: a
+      # `continue-on-error` attestation step is worse than none, because the
+      # release then advertises a provenance chain that silently is not there.
+      # Until the plan allows it, the verification story is the reproducible
+      # build plus SHA256SUMS — rebuild the tag and compare, which depends on
+      # trusting nobody.
+      #
+      # - name: Attest provenance
+      #   uses: actions/attest-build-provenance@v1
+      #   with:
+      #     subject-path: 'dist/*'
 
       - name: Artifacts
         uses: actions/upload-artifact@v4

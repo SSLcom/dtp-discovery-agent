@@ -123,13 +123,16 @@ sorted entries and a fixed mtime, so you can rebuild a tag yourself and compare:
 git checkout v1.2.3 && script/build-release.sh 1.2.3 && cat dist/SHA256SUMS
 ```
 
-CI enforces this by building twice and diffing, and each release also carries a
-GitHub build-provenance attestation — a signed statement of which workflow, from
-which commit, produced those exact bytes:
+CI enforces this by building twice and diffing. Rebuilding the tag yourself and
+comparing checksums is the verification path that depends on trusting nobody.
 
-```sh
-gh attestation verify dtp-agent_1.2.3_linux_amd64.tar.gz --repo SSLcom/dtp-discovery-agent
-```
+Releases do **not** currently carry a GitHub build-provenance attestation:
+`actions/attest-build-provenance` is unavailable for private repositories in an
+organization without the plan for it. The step is present but commented out in
+`.github/workflows/release.yml`, with the reason, so it can be switched on the
+day that changes — running it and ignoring failures would be worse than not
+running it, because the release would then advertise a provenance chain that is
+not there.
 
 ## Releasing
 
