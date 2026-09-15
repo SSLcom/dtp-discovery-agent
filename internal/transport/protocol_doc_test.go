@@ -1,6 +1,9 @@
 package transport
 
 import (
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -58,11 +61,18 @@ func TestProtocolDocMatchesTheCode(t *testing.T) {
 	}
 }
 
-// The document tells an implementer to join five lines with \n and sign the
-// SHA-256 of the result. This builds that string from the document's own
-// description and checks a real assertion verifies against it — so the
-// instructions are not merely present, they are correct.
+// The document shows an implementer the exact string to sign. This EXTRACTS
+// that recipe from PROTOCOL.md, fills in a real assertion's values, and checks
+// the signature the client produced verifies over it.
+//
+// The first version of this test hardcoded the prefix and audience and compared
+// them to the package constants — so it never opened the document at all, and a
+// swapped line, an extra line or a trailing newline in the published recipe
+// would have passed. Bugbot caught that. A test named for the document has to
+// read the document.
 func TestDocumentedAssertionRecipeProducesAValidSignature(t *testing.T) {
+	recipeTemplate := extractSigningRecipe(t)
+
 	signer := testSigner(t)
 	raw, err := signer.Assertion()
 	if err != nil {
@@ -70,26 +80,62 @@ func TestDocumentedAssertionRecipeProducesAValidSignature(t *testing.T) {
 	}
 	a := raw.(assertion)
 
-	// Exactly as PROTOCOL.md describes it: five lines, joined with \n, no
-	// trailing newline.
-	recipe := strings.Join([]string{
-		"DTP-DISCOVERY-AGENT-ASSERTION-v1",
-		a.KeyFingerprint,
-		a.IssuedAt,
-		a.Nonce,
-		"dtp-discovery",
-	}, "\n")
-
-	if strings.HasSuffix(recipe, "\n") {
-		t.Fatal("the recipe must not end in a newline")
+	recipe := recipeTemplate
+	for placeholder, value := range map[string]string{
+		"<key_fingerprint>": a.KeyFingerprint,
+		"<issued_at>":       a.IssuedAt,
+		"<nonce>":           a.Nonce,
+	} {
+		if !strings.Contains(recipe, placeholder) {
+			t.Fatalf("the documented recipe has no %s placeholder:\n%q", placeholder, recipe)
+		}
+		recipe = strings.Replace(recipe, placeholder, value, 1)
 	}
-	if got := signedString(signer.Fingerprint, a.IssuedAt, a.Nonce); got != recipe {
-		t.Fatalf("the documented recipe differs from what the client signs:\n doc:  %q\n code: %q", recipe, got)
+
+	// Signed exactly as the document instructs: SHA-256 of the joined string.
+	digest := sha256.Sum256([]byte(recipe))
+	sig, err := base64.StdEncoding.DecodeString(a.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(&signer.Key.PublicKey, digest[:], sig) {
+		t.Fatalf("a signature from this client does NOT verify over the recipe the document publishes.\n"+
+			"An implementer following PROTOCOL.md would be rejected.\nrecipe: %q", recipe)
 	}
 }
 
-// signedString mirrors what Assertion() signs, so the test above compares the
-// document against the code rather than against itself.
-func signedString(fingerprint, issuedAt, nonce string) string {
-	return strings.Join([]string{assertionPrefix, fingerprint, issuedAt, nonce, assertionAudience}, "\n")
+// extractSigningRecipe pulls the fenced block from PROTOCOL.md that shows the
+// string to sign — identified by its placeholders rather than by position, so
+// reordering the document does not silently select the wrong block.
+func extractSigningRecipe(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
+	if err != nil {
+		t.Fatalf("reading PROTOCOL.md: %v", err)
+	}
+
+	var found []string
+	for _, block := range strings.Split(string(raw), "```")[1:] {
+		if strings.Contains(block, "<key_fingerprint>") && strings.Contains(block, "<nonce>") {
+			// Drop an info string on the opening fence, and the newline the
+			// fence itself contributes — but keep everything else byte for
+			// byte, because a stray blank line IS the bug this looks for.
+			body := block
+			if i := strings.Index(body, "\n"); i >= 0 {
+				body = body[i+1:]
+			}
+			found = append(found, strings.TrimSuffix(body, "\n"))
+		}
+	}
+
+	switch len(found) {
+	case 1:
+		return found[0]
+	case 0:
+		t.Fatal("PROTOCOL.md no longer contains a signing recipe block")
+	default:
+		t.Fatalf("PROTOCOL.md has %d signing-recipe blocks; the test cannot tell which is authoritative", len(found))
+	}
+	return ""
 }
