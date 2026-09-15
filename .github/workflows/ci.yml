@@ -67,13 +67,25 @@ jobs:
       # state directory that holds the agent's private key at 0700.
       - name: Package installs cleanly
         run: |
-          docker run --rm -v "$PWD/dist":/d:ro debian:bookworm-slim bash -c '
-            set -e
-            dpkg -i /d/dtp-agent_0.0.0-ci_amd64.deb >/dev/null
-            dtp-agent version
-            mode=$(stat -c %a /var/lib/dtp-agent)
-            [ "$mode" = 700 ] || { echo "state dir is $mode, want 700"; exit 1; }
-          '
+          set -euo pipefail
+          # Found by name, NOT assumed: nfpm rewrites a pre-release version into
+          # Debian's own spelling — "0.0.0-ci" becomes "0.0.0~ci", which sorts
+          # BEFORE 0.0.0 as a pre-release should. Hardcoding the filename here
+          # was wrong for exactly that reason, and this job is where it showed.
+          shopt -s nullglob
+          debs=(dist/*_amd64.deb)
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one amd64 .deb, found ${#debs[@]}"; exit 1; }
+          echo "installing ${debs[0]}"
+
+          docker run --rm -v "$PWD/dist":/d:ro -e DEB="$(basename "${debs[0]}")" \
+            debian:bookworm-slim bash -c '
+              set -e
+              dpkg -i "/d/$DEB" >/dev/null
+              dtp-agent version
+              mode=$(stat -c %a /var/lib/dtp-agent)
+              [ "$mode" = 700 ] || { echo "state dir is $mode, want 700"; exit 1; }
+              echo "state dir 0700, binary runs"
+            '
 
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops
