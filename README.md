@@ -63,8 +63,13 @@ empty password. The agent never guesses at a password.
 
 ## The protocol, and the two fields that fail silently
 
-Full description in the server's README. Two client obligations are worth
-repeating because dropping either changes behaviour and raises no error:
+**[`docs/PROTOCOL.md`](docs/PROTOCOL.md)** describes the whole wire protocol —
+every endpoint, the assertion construction, the status codes and what they mean,
+the rate limits, and the versioning promise. Enough to audit what this agent
+sends, or to write your own client.
+
+Two client obligations are worth repeating here, because dropping either changes
+behaviour and raises no error:
 
 - **`X-DTP-Agent-Fingerprint` on `/discovery/v1/token`.** Nothing on the server
   reads it; the host's rate limiter does, because middleware cannot parse a
@@ -78,7 +83,9 @@ repeating because dropping either changes behaviour and raises no error:
   omitted — and the failure mode of omitting it is an inventory that never
   shrinks rather than certificates that wrongly vanish.
 
-Both are asserted in `internal/transport`.
+Both are asserted in `internal/transport`, and a test checks the protocol
+document still says what the code does — a constant that drifts there does not
+break a build, it breaks somebody else's client for reasons they cannot see.
 
 ## Installing
 
