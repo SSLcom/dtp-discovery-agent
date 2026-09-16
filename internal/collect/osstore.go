@@ -133,6 +133,16 @@ func (c *OSStore) Collect(ctx context.Context) Result {
 // in the other direction — a self-signed certificate this machine HOLDS THE KEY
 // for is a real deployment, and internal infrastructure is full of them.
 func trustAnchor(entry storeEntry) bool {
+	// THE STORE ITSELF IS THE STRONGEST SIGNAL, and the only one that always
+	// holds. Measured on a Windows runner: after the two rules below, TWO
+	// certificates in LocalMachine\Root still came through — cross-signed roots,
+	// so neither self-signed nor flagged as a CA. Nothing about their contents
+	// says what they are. What says it is that somebody put them in the store
+	// whose entire purpose is holding certificates this machine believes.
+	if anchorStore(entry.Store) {
+		return true
+	}
+
 	cert := entry.Certificate
 	if cert.IsCA {
 		return true
@@ -141,6 +151,21 @@ func trustAnchor(entry storeEntry) bool {
 		return true
 	}
 	return false
+}
+
+// anchorStore reports whether a store exists to hold trust anchors. Nothing in
+// one of these is deployed on the machine, whatever shape the certificate is.
+func anchorStore(store string) bool {
+	name := strings.ToLower(store)
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		name = name[i+1:]
+	}
+	switch name {
+	case "root", "ca", "authroot", "disallowed":
+		return true
+	}
+	// macOS keeps the same thing in a keychain of its own.
+	return strings.Contains(strings.ToLower(store), "systemrootcertificates")
 }
 
 // thumbprint is the SHA-1 hash Windows shows in the certificates snap-in and

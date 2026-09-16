@@ -164,9 +164,35 @@ func errNoOSStoreForTest() error {
 // The private key is what tells the two apart. Internal infrastructure is full
 // of self-signed SERVER certificates, and a machine holding the key for one is
 // serving it.
+// A store whose purpose is trust anchors holds nothing this machine serves,
+// whatever shape the certificates in it are. Measured: two certificates in a
+// Windows Root store are cross-signed, so they are neither self-signed nor
+// flagged as CAs, and nothing about their contents gives them away.
+func TestEverythingInAnAnchorStoreIsAnAnchor(t *testing.T) {
+	for _, store := range []string{`LocalMachine\Root`, `LocalMachine\CA`, `CurrentUser\AuthRoot`,
+		`LocalMachine\Disallowed`, "/System/Library/Keychains/SystemRootCertificates.keychain"} {
+		// A certificate that would otherwise read as a deployment: not a CA,
+		// issued by somebody else, and with a key.
+		entry := storeEntry{Store: store, Certificate: caSignedLeaf(t), HasPrivateKey: true}
+		if !trustAnchor(entry) {
+			t.Errorf("%s exists to hold anchors; nothing in it is deployed here", store)
+		}
+	}
+	// And a store that holds what the machine serves is not one of them.
+	for _, store := range []string{`LocalMachine\My`, `LocalMachine\WebHosting`, "/Library/Keychains/System.keychain"} {
+		entry := storeEntry{Store: store, Certificate: caSignedLeaf(t), HasPrivateKey: true}
+		if trustAnchor(entry) {
+			t.Errorf("%s is where a served certificate lives", store)
+		}
+	}
+}
+
 func TestASelfSignedCertificateIsAnAnchorOrADeploymentAccordingToTheKey(t *testing.T) {
+	// Deliberately NOT an anchor store. This is checking what the CERTIFICATE
+	// says; putting it in Root would let the assertion pass for the store
+	// rule's reason instead.
 	selfSignedNoKey := storeEntry{
-		Store: `LocalMachine\Root`, Certificate: certFor(t, "An Old Root", false),
+		Store: `LocalMachine\My`, Certificate: certFor(t, "An Old Root", false),
 	}
 	if !trustAnchor(selfSignedNoKey) {
 		t.Error("a self-signed certificate this machine has no key for is an issuer it believes, not something it serves")
