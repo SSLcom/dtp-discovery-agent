@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
@@ -104,18 +105,23 @@ func TestFindsACertificateThisMachineHoldsTheKeyFor(t *testing.T) {
 		t.Skip("writes to CurrentUser\\My; runs on the Windows CI runner")
 	}
 
-	cert, pfx := selfSignedPFX(t, "dtp-agent-test.invalid")
+	// A REAL PASSWORD, not an empty one. `certutil -p ""` does not mean "no
+	// password" to certutil — it prompts, and on the CI runner it sat there
+	// until the whole test binary hit its ten-minute limit and panicked.
+	const password = "dtp-agent-test-password"
+
+	cert, pfx := selfSignedPFX(t, "dtp-agent-test.invalid", password)
 	path := filepath.Join(t.TempDir(), "test.pfx")
 	if err := os.WriteFile(path, pfx, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	want := thumbprint(cert)
-	if out, err := run("certutil", "-user", "-f", "-p", "", "-importpfx", "My", path); err != nil {
+	if out, err := run(t, "certutil", "-user", "-f", "-p", password, "-importpfx", "My", path); err != nil {
 		t.Fatalf("importing the test certificate: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		if out, err := run("certutil", "-user", "-delstore", "My", want); err != nil {
+		if out, err := run(t, "certutil", "-user", "-delstore", "My", want); err != nil {
 			t.Logf("could not remove the test certificate %s: %v\n%s", want, err, out)
 		}
 	})
@@ -141,7 +147,7 @@ func TestFindsACertificateThisMachineHoldsTheKeyFor(t *testing.T) {
 }
 
 // selfSignedPFX is a certificate and its key, in the form certutil imports.
-func selfSignedPFX(t *testing.T, cn string) (*x509.Certificate, []byte) {
+func selfSignedPFX(t *testing.T, cn, password string) (*x509.Certificate, []byte) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -163,15 +169,27 @@ func selfSignedPFX(t *testing.T, cn string) (*x509.Certificate, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pfx, err := pkcs12.Modern.Encode(key, cert, nil, "")
+	pfx, err := pkcs12.Modern.Encode(key, cert, nil, password)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cert, pfx
 }
 
-func run(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+// run bounds the subprocess. A tool that decides to prompt has no one to answer
+// it here, and the first version of this test let certutil sit on a hidden
+// prompt until the entire test binary hit its ten-minute limit and panicked —
+// taking every other test's result with it. A minute is generous for certutil
+// and short enough to leave a readable failure.
+func run(t *testing.T, name string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return string(out), fmt.Errorf("%s did not finish within a minute (it is probably waiting for input): %w", name, ctx.Err())
+	}
 	return string(out), err
 }
