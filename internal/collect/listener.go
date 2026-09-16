@@ -123,16 +123,10 @@ func (c *Listener) targets(b ListenerBounds, res *Result) (targets []socket, swe
 }
 
 func (c *Listener) probeAll(ctx context.Context, b ListenerBounds, targets []socket, res *Result) {
-	type outcome struct {
-		observations []Observation
-		errs         []Error
-		incomplete   bool
-	}
-
 	var (
 		wg      sync.WaitGroup
 		gate    = make(chan struct{}, b.Concurrency)
-		results = make([]outcome, len(targets))
+		results = make([]probeOutcome, len(targets))
 	)
 
 	for i, target := range targets {
@@ -145,37 +139,9 @@ func (c *Listener) probeAll(ctx context.Context, b ListenerBounds, targets []soc
 			defer wg.Done()
 			gate <- struct{}{}
 			defer func() { <-gate }()
-
-			var out outcome
-			// The probe with no SNI comes first: it is what a client that knows
-			// only the address receives, and on a single-site host it is the
-			// whole answer.
-			for _, serverName := range append([]string{""}, b.ServerNames...) {
-				obs, verdict, err := c.probeOne(ctx, b, target, serverName)
-				if verdict == probeFound {
-					out.observations = append(out.observations, *obs)
-					continue
-				}
-				if verdict == probeNone {
-					// Nothing is wrong: this port serves something that is not
-					// TLS, or nothing at all. Recording that as an error would
-					// fill a member's portfolio with every database and SSH
-					// daemon they run. No later SNI will change the answer.
-					break
-				}
-				out.incomplete = true
-				out.errs = append(out.errs, Error{
-					Collector: SourceListener,
-					Location:  target.dialAddress(),
-					Error:     err.Error(),
-				})
-				// A port that answered ambiguously once answers the same for
-				// every name; stop rather than time out against it per host.
-				break
-			}
 			// Each goroutine owns results[i] and nothing else, so the slice
 			// needs no lock — it is read only after Wait.
-			results[i] = out
+			results[i] = c.probeTarget(ctx, b, target)
 		}(i, target)
 	}
 	wg.Wait()
@@ -187,6 +153,84 @@ func (c *Listener) probeAll(ctx context.Context, b ListenerBounds, targets []soc
 			res.Completed = false
 		}
 	}
+}
+
+type probeOutcome struct {
+	observations []Observation
+	errs         []Error
+	incomplete   bool
+}
+
+// maxUnansweredNames stops a port that will not answer from costing one timeout
+// per configured name. A machine hosting fifty sites behind a socket that hangs
+// would otherwise hold a goroutine for fifty timeouts — four minutes on the
+// defaults — to learn the same thing three probes already said.
+const maxUnansweredNames = 3
+
+// probeTarget asks one socket for its certificates: once carrying no SNI, then
+// once for each name the configuration says it serves.
+func (c *Listener) probeTarget(ctx context.Context, b ListenerBounds, target socket) probeOutcome {
+	var out probeOutcome
+
+	// The probe with no SNI comes first: it is what a client that knows only
+	// the address receives, and on a single-site host it is the whole answer.
+	names := append([]string{""}, b.ServerNames...)
+	unanswered := 0
+
+	for i, serverName := range names {
+		obs, verdict, err := c.probeOne(ctx, b, target, serverName)
+
+		switch verdict {
+		case probeFound:
+			out.observations = append(out.observations, *obs)
+			unanswered = 0
+
+		case probeNone:
+			// ONLY THE FIRST PROBE CAN CONCLUDE ANYTHING ABOUT THE PORT. It
+			// carries no SNI, so nothing answering it means nothing here speaks
+			// TLS, and no name will change that — stopping saves a member's
+			// machine a probe per site for every database and SSH daemon they
+			// run.
+			//
+			// A LATER name drawing no certificate says only that this host does
+			// not serve that name, which is ordinary: the configuration
+			// collector reports every name on the machine, and they are not all
+			// on every socket. Stopping there would abandon the sites after it
+			// in the list while the sweep still counted as complete — and a
+			// complete sweep that did not look is what marks a live
+			// certificate gone.
+			if i == 0 {
+				return out
+			}
+
+		default: // probeUnknown
+			out.incomplete = true
+			out.errs = append(out.errs, Error{
+				Collector: SourceListener,
+				Location:  probeLocation(target, serverName),
+				Error:     err.Error(),
+			})
+			// Not a reason to give up on the names. A default server configured
+			// to refuse a handshake that carries no SNI — nginx's
+			// ssl_reject_handshake, which is ordinary on a machine that does not
+			// want to be enumerated — answers the first probe exactly like this
+			// while serving every named site perfectly.
+			unanswered++
+			if unanswered >= maxUnansweredNames {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// probeLocation names what was asked, so an error tells a member which probe
+// failed rather than only which socket.
+func probeLocation(target socket, serverName string) string {
+	if serverName == "" {
+		return target.dialAddress()
+	}
+	return target.dialAddress() + " (" + serverName + ")"
 }
 
 func (c *Listener) probeOne(ctx context.Context, b ListenerBounds, target socket, serverName string) (*Observation, verdict, error) {

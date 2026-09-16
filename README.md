@@ -85,6 +85,12 @@ Three things it deliberately does:
   whether or not the agent was let in.
 - **Speaks down to TLS 1.0.** Forgotten listeners are old listeners.
 
+It probes once carrying no SNI and once per name it is given. A name that draws
+no certificate is ordinary — not every name on a machine is on every socket — so
+it stops that name, not the sweep; and a port that refuses the *nameless* probe
+is still asked for its names, because nginx's `ssl_reject_handshake` does
+exactly that while serving every named site perfectly.
+
 Ports that serve something other than TLS are silent, not errors: a host is full
 of them. A listener the agent could *not* finish talking to is reported and
 stops the sweep counting as complete, because a certificate it could not see is

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"strconv"
@@ -458,5 +459,129 @@ func TestAListenerThatRejectsTheHandshakeIsReportedNotIgnored(t *testing.T) {
 	}
 	if !strings.Contains(res.Errors[0].Error, "handshake failure") {
 		t.Errorf("the error should say what the listener said: %q", res.Errors[0].Error)
+	}
+}
+
+// ── one name's answer must not decide another's ──────────────────────────────
+
+// replayConn hands a peeked ClientHello back to a TLS server, so a fixture can
+// look at the SNI in the clear (it is not encrypted) and then decide how to
+// behave without the client noticing it was inspected.
+type replayConn struct {
+	net.Conn
+	pre []byte
+}
+
+func (c *replayConn) Read(p []byte) (int, error) {
+	if len(c.pre) > 0 {
+		n := copy(p, c.pre)
+		c.pre = c.pre[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
+}
+
+// serveBySNI starts a listener that reads the ClientHello and then does
+// whatever decide says: complete the handshake, stay silent, or refuse.
+func serveBySNI(t *testing.T, cfg *tls.Config, decide func(hello []byte) string) int {
+	t.Helper()
+	return serveRaw(t, func(conn net.Conn) {
+		buf := make([]byte, 8192)
+		n, _ := conn.Read(buf)
+
+		switch decide(buf[:n]) {
+		case "silent":
+			_ = conn.Close()
+		case "refuse":
+			_, _ = conn.Write([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28})
+			_ = conn.Close()
+		default:
+			tlsConn := tls.Server(&replayConn{Conn: conn, pre: buf[:n]}, cfg)
+			_ = tlsConn.HandshakeContext(context.Background())
+			_ = tlsConn.Close()
+		}
+	})
+}
+
+// The configuration collector reports every name on the machine, and they are
+// not all on every socket — so a name drawing no certificate is ordinary. It
+// says nothing about the names after it in the list, and abandoning them while
+// the sweep still counted as complete is what marks a live certificate gone.
+func TestANameThatDrawsNothingDoesNotAbandonTheNamesAfterIt(t *testing.T) {
+	cert := selfSigned(t, "beta.example.com")
+	port := serveBySNI(t, &tls.Config{Certificates: []tls.Certificate{cert}},
+		func(hello []byte) string {
+			if strings.Contains(string(hello), "elsewhere.example.com") {
+				return "silent"
+			}
+			return "serve"
+		})
+
+	res := collectSwept(t, ListenerBounds{
+		Timeout:     2 * time.Second,
+		ServerNames: []string{"elsewhere.example.com", "beta.example.com"},
+	}, port)
+
+	names := commonNames(t, res)
+	if len(names) != 2 {
+		t.Fatalf("expected the no-SNI probe and beta to answer, got %v (errors %v)", names, res.Errors)
+	}
+	for _, obs := range res.Observations {
+		if obs.Binding["server_name"] == "elsewhere.example.com" {
+			t.Error("a name that served nothing must not produce an observation")
+		}
+	}
+	if !res.Completed {
+		t.Errorf("a host simply not serving one of its names is not an incomplete sweep: %v", res.Errors)
+	}
+}
+
+// nginx's ssl_reject_handshake — ordinary on a machine that does not want to be
+// enumerated — refuses any connection carrying no SNI while serving every named
+// site perfectly. Treating that first refusal as the end of the port would find
+// nothing at all on exactly those hosts.
+func TestAPortThatRefusesTheNamelessProbeIsStillAskedForItsNames(t *testing.T) {
+	cert := selfSigned(t, "named.example.com")
+	port := serveBySNI(t, &tls.Config{Certificates: []tls.Certificate{cert}},
+		func(hello []byte) string {
+			if !strings.Contains(string(hello), "named.example.com") {
+				return "refuse"
+			}
+			return "serve"
+		})
+
+	res := collectSwept(t, ListenerBounds{
+		Timeout:     2 * time.Second,
+		ServerNames: []string{"named.example.com"},
+	}, port)
+
+	if names := commonNames(t, res); len(names) != 1 || names[0] != "named.example.com" {
+		t.Fatalf("the named site should still be found, got %v (errors %v)", names, res.Errors)
+	}
+	// The refusal is still reported and still spoils the sweep: the agent does
+	// not know what that socket would have served to a nameless client.
+	if res.Completed || len(res.Errors) == 0 {
+		t.Error("a refusal the agent could not interpret must be reported and must stop the sweep")
+	}
+}
+
+// A socket that answers nothing must not cost one timeout per configured name.
+// Fifty sites behind a hung port would hold a goroutine for four minutes on the
+// defaults to learn what three probes already said.
+func TestAPortThatNeverAnswersIsGivenUpOn(t *testing.T) {
+	port := serveBySNI(t, &tls.Config{}, func([]byte) string { return "refuse" })
+
+	many := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		many = append(many, fmt.Sprintf("site%02d.example.com", i))
+	}
+
+	res := collectSwept(t, ListenerBounds{Timeout: 2 * time.Second, ServerNames: many}, port)
+
+	if len(res.Errors) > maxUnansweredNames {
+		t.Fatalf("probed a hopeless port %d times; %d is the bound", len(res.Errors), maxUnansweredNames)
+	}
+	if res.Completed {
+		t.Error("a port the agent could not read must still spoil the sweep")
 	}
 }
