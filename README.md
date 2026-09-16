@@ -63,6 +63,38 @@ this product exists to prevent.
 Recognised today: PEM and DER certificate files, and PKCS#12 bundles with an
 empty password. The agent never guesses at a password.
 
+**A file of nothing but CA certificates is skipped.** That is a *trust store* —
+`ca-certificates.crt`, a chain file on its own — and it is a list of the issuers
+a machine is willing to believe, not something deployed on it. Measured on an
+ordinary host, reporting one meant a CA root nobody chose arriving with a
+hundred and twenty others as its "chain", from every machine in an estate. The
+end-entity certificate is also located by *looking* for it rather than taking
+the first in the file, because bundles are concatenations and plenty of tools
+write the chain first.
+
+### Java keystores (`java_keystore`)
+
+**Invisible to every other collector.** A `.jks` is neither PEM nor DER, so a
+filesystem walk reads straight past it — which means a Tomcat, a JBoss or an
+Elasticsearch terminating TLS looks, to every other source, like a machine with
+no certificates on it at all.
+
+JKS and JCEKS are read directly rather than through a library, for two reasons
+that are the same reason. **The private keys are never read**: a key entry
+carries its encrypted blob behind a length, and the parser skips that many bytes
+without looking at them, so the bytes are never copied, decrypted or held. A
+keystore library exists to return keys; this does not. And it follows that **the
+agent needs no password** — certificate entries in a JKS are not encrypted, so
+the certificates come out of a store whose password nobody has told the agent,
+which is the usual situation on a machine set up years ago by somebody who left.
+
+Findings are per *alias*, because the alias is what `keytool -delete -alias`
+takes and, on a store with six of them, the only thing that says which one is
+expiring. A `cacerts` contributes nothing, by the trust-store rule above.
+
+PKCS#12 keystores — what `keytool` has written by default since JDK 9 — are read
+too, when they open with an empty password.
+
 ### Web server configuration (`server_config`)
 
 **The only source that knows which *site* a certificate belongs to.** The file
@@ -260,10 +292,10 @@ dtp-agent run --once --state /tmp/agent-state
 generating a CSR on the host, and the command queue are v2 — designed for in
 the server's `AgentCommand` shape, not built.
 
-Collectors shipped: filesystem, nginx and Apache configuration, local TLS
-listener probe. Planned: IIS configuration and the OS and application trust
-stores (Windows store, macOS keychain, NSS, Java keystores) — IIS depends on the
-Windows store, since a binding names only a thumbprint.
+Collectors shipped: filesystem, Java keystores, nginx and Apache configuration,
+local TLS listener probe. Planned: IIS configuration and the OS trust stores
+(Windows store, macOS keychain, NSS) — IIS depends on the Windows store, since a
+binding names only a thumbprint.
 
 Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
 systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service

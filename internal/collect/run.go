@@ -10,6 +10,7 @@ import (
 // Options is everything a scan can be told.
 type Options struct {
 	File         Bounds
+	Keystores    KeystoreBounds
 	ServerConfig ServerConfigBounds
 	Listener     ListenerBounds
 
@@ -33,6 +34,7 @@ type Options struct {
 func All(opts Options) []Collector {
 	return []Collector{
 		&FS{Bounds: opts.File},
+		&Keystores{Bounds: opts.Keystores},
 		&ServerConfig{Bounds: opts.ServerConfig},
 		&Listener{Bounds: opts.Listener},
 	}

@@ -196,6 +196,7 @@ func scanOptions(cfg *state.Config, override, disabled []string) collect.Options
 		opts.File.Roots = cfg.ScanRoots
 		opts.File.MaxFileBytes = cfg.MaxFileBytes
 		opts.File.MaxDepth = cfg.MaxDepth
+		opts.Keystores.Roots = cfg.KeystoreRoots
 		opts.ServerConfig.NginxConfigs = cfg.NginxConfigs
 		opts.ServerConfig.ApacheConfigs = cfg.ApacheConfigs
 		opts.Disabled = cfg.DisabledSources
