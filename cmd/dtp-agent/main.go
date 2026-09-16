@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -109,7 +108,7 @@ func rootsFlag(fs *flag.FlagSet) *roots {
 // accepted on scan/run so the effect can be seen before it is committed to.
 func withoutFlag(fs *flag.FlagSet) *roots {
 	r := &roots{}
-	fs.Var(r, "without", "source not to collect: "+strings.Join(sourceNames(), ", ")+" (repeatable)")
+	fs.Var(r, "without", "source not to collect: "+strings.Join(collect.Names(), ", ")+" (repeatable)")
 	return r
 }
 
@@ -129,7 +128,7 @@ func cmdEnroll(ctx context.Context, args []string) error {
 	if *server == "" || *account == "" {
 		return errors.New("--server and --account are required")
 	}
-	if err := validateSources(*skip); err != nil {
+	if err := collect.ValidateDisabled(*skip); err != nil {
 		return err
 	}
 
@@ -189,72 +188,27 @@ func cmdEnroll(ctx context.Context, args []string) error {
 
 // ── scan ─────────────────────────────────────────────────────────────────────
 
-// allCollectors is THE list of what this build can collect, and the only one.
-// Every other place that needs to know — the --without help text, the
-// validation that rejects a misspelt source, the collectors a scan actually
-// runs — derives from here, so adding a collector cannot leave a second list
-// quietly stale behind it.
-func allCollectors(bounds collect.Bounds) []collect.Collector {
-	return []collect.Collector{
-		&collect.FS{Bounds: bounds},
-		&collect.Listener{},
-	}
-}
-
-func sourceNames() []string {
-	all := allCollectors(collect.Bounds{})
-	names := make([]string, 0, len(all))
-	for _, c := range all {
-		names = append(names, c.Source())
-	}
-	return names
-}
-
-// validateSources refuses a source name this build does not have.
-//
-// Silently ignoring a typo is the worse failure by far: `--without listner`
-// would leave the probe RUNNING on a host whose owner believes they turned it
-// off, and nothing in the output would say so.
-func validateSources(disabled []string) error {
-	known := sourceNames()
-	for _, name := range disabled {
-		if !slices.Contains(known, name) {
-			return fmt.Errorf("unknown source %q: this agent collects %s", name, strings.Join(known, ", "))
-		}
-	}
-	return nil
-}
-
-func collectors(cfg *state.Config, override, disabled []string) []collect.Collector {
-	bounds := collect.Bounds{}
-	var off []string
+// scanOptions turns what the agent was told — its stored config and this
+// invocation's flags — into what the collectors are given.
+func scanOptions(cfg *state.Config, override, disabled []string) collect.Options {
+	opts := collect.Options{}
 	if cfg != nil {
-		bounds.Roots = cfg.ScanRoots
-		bounds.MaxFileBytes = cfg.MaxFileBytes
-		bounds.MaxDepth = cfg.MaxDepth
-		off = cfg.DisabledSources
+		opts.File.Roots = cfg.ScanRoots
+		opts.File.MaxFileBytes = cfg.MaxFileBytes
+		opts.File.MaxDepth = cfg.MaxDepth
+		opts.ServerConfig.NginxConfigs = cfg.NginxConfigs
+		opts.ServerConfig.ApacheConfigs = cfg.ApacheConfigs
+		opts.Disabled = cfg.DisabledSources
 	}
 	if len(override) > 0 {
-		bounds.Roots = override
+		opts.File.Roots = override
 	}
-	off = append(off, disabled...)
-
-	all := allCollectors(bounds)
-	out := make([]collect.Collector, 0, len(all))
-	for _, c := range all {
-		if !slices.Contains(off, c.Source()) {
-			out = append(out, c)
-		}
-	}
-	return out
+	opts.Disabled = append(opts.Disabled, disabled...)
+	return opts
 }
 
 func runCollectors(ctx context.Context, cfg *state.Config, override, disabled []string) []collect.Result {
-	var out []collect.Result
-	for _, c := range collectors(cfg, override, disabled) {
-		out = append(out, c.Collect(ctx))
-	}
-	return out
+	return collect.Run(ctx, scanOptions(cfg, override, disabled))
 }
 
 func cmdScan(ctx context.Context, args []string) error {
@@ -267,7 +221,7 @@ func cmdScan(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := validateSources(*skip); err != nil {
+	if err := collect.ValidateDisabled(*skip); err != nil {
 		return err
 	}
 
@@ -294,13 +248,13 @@ func cmdScan(ctx context.Context, args []string) error {
 			if o.PrivateKeyPresent {
 				key = "key at " + o.PrivateKeyLocation
 			}
-			fmt.Printf("  %-9s %s (%s)\n", o.Source, o.Location, key)
+			fmt.Printf("  %-13s %s (%s)\n", o.Source, o.Location, key)
 		}
 		for _, e := range r.Errors {
-			fmt.Printf("  !         %s: %s\n", e.Location, e.Error)
+			fmt.Printf("  %-13s %s: %s\n", "!", e.Location, e.Error)
 		}
 		if !r.Completed {
-			fmt.Printf("  note      the %s collector did not finish; nothing it found will be marked absent\n", r.Source)
+			fmt.Printf("  %-13s the %s collector did not finish; nothing it found will be marked absent\n", "note", r.Source)
 		}
 	}
 	fmt.Printf("\n%d certificate(s) found. Nothing was uploaded.\n", total)
@@ -319,7 +273,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := validateSources(*skip); err != nil {
+	if err := collect.ValidateDisabled(*skip); err != nil {
 		return err
 	}
 

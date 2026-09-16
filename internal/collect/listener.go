@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +69,21 @@ type Listener struct {
 }
 
 func (c *Listener) Source() string { return SourceListener }
+
+// Inform takes the server names the configuration collector found and probes
+// for each of them by SNI.
+//
+// This is the whole reason the two collectors are ordered. A probe that sends
+// no SNI gets a name-based virtual host's DEFAULT certificate; on a machine
+// hosting twenty sites that is nineteen certificates nothing in the estate can
+// see, and they are exactly the ones nobody is watching.
+func (c *Listener) Inform(earlier []Result) {
+	for _, name := range ServerNamesFrom(earlier) {
+		if !slices.Contains(c.Bounds.ServerNames, name) {
+			c.Bounds.ServerNames = append(c.Bounds.ServerNames, name)
+		}
+	}
+}
 
 func (c *Listener) Collect(ctx context.Context) Result {
 	b := c.Bounds.withDefaults()
