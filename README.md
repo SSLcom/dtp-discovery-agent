@@ -63,6 +63,32 @@ this product exists to prevent.
 Recognised today: PEM and DER certificate files, and PKCS#12 bundles with an
 empty password. The agent never guesses at a password.
 
+### Web server configuration (`server_config`)
+
+**The only source that knows which *site* a certificate belongs to.** The file
+collector can say a certificate is at `/etc/ssl/site.pem`; only the
+configuration says it is what `www.example.com` presents, that the key is the
+file two directories away, and that a second certificate is configured beside it
+for clients that cannot do ECDSA. It also finds certificates nothing else does —
+a path outside every scanned root is still found, because the configuration
+named it.
+
+nginx and Apache today. Includes are followed and spliced in place, because on a
+Debian host `sites-enabled` *is* the configuration; Apache's are resolved against
+`ServerRoot` rather than the including file, which is the difference between
+reading a Red Hat host's sites and reading none of them.
+
+**A configured certificate that is missing is a finding, not a failure** — the
+site is broken, or will be at the next reload — so it is reported. Whether it
+stops the sweep counting as complete turns on *why*: a file that is **gone** was
+seen clearly and its placement should be retired, while one that could not be
+**read** is a certificate the agent did not see, and must never be reported as
+one that was removed.
+
+IIS is not here yet. `applicationHost.config` names only a thumbprint; the
+certificate itself lives in the Windows store, so IIS waits for the `os_store`
+collector rather than producing sites with no certificate to report.
+
 ### Local TLS listeners (`listener`)
 
 **This is the only source that reports what is actually being served**, and the
@@ -99,6 +125,11 @@ not one that was removed.
 On Windows and macOS the agent cannot yet read the socket table, so it probes a
 well-known port list instead — and, because a guess is not a sweep, never
 declares this source complete there.
+
+It is told the server names the configuration collector found and sends each as
+SNI. That ordering is load-bearing: a probe carrying no SNI gets a name-based
+virtual host's **default** certificate, so on a machine hosting twenty sites the
+other nineteen are invisible — and they are exactly the ones nobody is watching.
 
 **Turning it off:** `--without listener`, at enrolment (recorded in the config)
 or on a single `scan`/`run`. Probing local services is a thing a security team
@@ -229,14 +260,10 @@ dtp-agent run --once --state /tmp/agent-state
 generating a CSR on the host, and the command queue are v2 — designed for in
 the server's `AgentCommand` shape, not built.
 
-Collectors shipped: filesystem, local TLS listener probe. Planned:
-nginx/Apache/IIS config parsing, OS and application trust stores (Windows store,
-macOS keychain, NSS, Java keystores).
-
-The listener probe sends SNI for any name it is given, which is how the other
-twenty sites on a name-based virtual host become visible — a probe without SNI
-gets only the default certificate. Nothing supplies those names yet; the
-server-config collector is what will.
+Collectors shipped: filesystem, nginx and Apache configuration, local TLS
+listener probe. Planned: IIS configuration and the OS and application trust
+stores (Windows store, macOS keychain, NSS, Java keystores) — IIS depends on the
+Windows store, since a binding names only a thumbprint.
 
 Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
 systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service
