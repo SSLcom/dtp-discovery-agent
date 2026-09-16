@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1" //nolint:gosec // a thumbprint IS SHA-1; it is an identifier, not a security claim
 	"crypto/x509"
@@ -84,10 +85,7 @@ func (c *OSStore) Collect(ctx context.Context) Result {
 		if entry.Certificate == nil {
 			continue
 		}
-		if _, _, found := parse.Leaf([]*x509.Certificate{entry.Certificate}); !found {
-			// A CA certificate in an OS store is a trust anchor. There are
-			// hundreds on every machine, and reporting them would drown the
-			// handful of certificates the host actually serves.
+		if trustAnchor(entry) {
 			continue
 		}
 
@@ -118,6 +116,31 @@ func (c *OSStore) Collect(ctx context.Context) Result {
 		})
 	}
 	return res
+}
+
+// trustAnchor reports whether a store entry is something this machine BELIEVES
+// rather than something it SERVES. There are hundreds of the first on every
+// machine and a handful of the second, so getting it wrong drowns the findings.
+//
+// basicConstraints ALONE IS NOT ENOUGH, which was measured rather than guessed:
+// on a Windows runner, fourteen certificates in LocalMachine\Root carry no
+// basicConstraints extension at all — they predate it being required — so Go
+// reports IsCA false and every one of them would have arrived in a member's
+// portfolio as a deployed certificate, from every Windows host they own.
+//
+// A self-signed certificate with no private key on this machine is the same
+// thing: an issuer somebody imported. The private-key qualifier is load-bearing
+// in the other direction — a self-signed certificate this machine HOLDS THE KEY
+// for is a real deployment, and internal infrastructure is full of them.
+func trustAnchor(entry storeEntry) bool {
+	cert := entry.Certificate
+	if cert.IsCA {
+		return true
+	}
+	if bytes.Equal(cert.RawSubject, cert.RawIssuer) && !entry.HasPrivateKey {
+		return true
+	}
+	return false
 }
 
 // thumbprint is the SHA-1 hash Windows shows in the certificates snap-in and

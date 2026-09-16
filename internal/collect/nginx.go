@@ -146,9 +146,17 @@ func nginxTokenize(src string) []nginxToken {
 		ch := runes[i]
 
 		if quote != 0 {
-			// A backslash escapes the next character inside quotes, which is
-			// how a path containing a quote is written.
-			if ch == '\\' && i+1 < len(runes) {
+			// A backslash escapes the next character inside quotes — but ONLY
+			// the characters that need escaping.
+			//
+			// nginx itself drops the backslash before anything at all, so
+			// "C:\Users\nginx\ssl\site.pem" reads as "C:Usersnginxsslsite.pem"
+			// there too. This agent deliberately does not follow it that far.
+			// Its job is to find the file, a Windows path is the only place the
+			// difference shows up, and reading it nginx's way turns every
+			// quoted path on a Windows host into a "configured certificate is
+			// missing" alarm about a site that is serving perfectly.
+			if ch == '\\' && i+1 < len(runes) && needsEscaping(runes[i+1]) {
 				i++
 				current.WriteRune(runes[i])
 				continue
@@ -182,6 +190,16 @@ func nginxTokenize(src string) []nginxToken {
 	}
 	flush()
 	return tokens
+}
+
+// needsEscaping is the set a backslash is meaningful before: the quote
+// characters, itself, and nginx's variable marker.
+func needsEscaping(r rune) bool {
+	switch r {
+	case '"', '\'', '\\', '$':
+		return true
+	}
+	return false
 }
 
 // nginxParseBlock consumes tokens until the block ends, returning what it read

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -54,6 +55,17 @@ func readOSStores(ctx context.Context, only []string) ([]storeEntry, []storeFail
 	for _, keychain := range keychains {
 		if ctx.Err() != nil {
 			return entries, failures, ctx.Err()
+		}
+
+		// ASKED BEFORE RUNNING THE TOOL, because `security find-certificate`
+		// exits ZERO and prints nothing for a keychain that is not there —
+		// measured on a macOS runner. Without this check, a system keychain that
+		// had been moved, renamed or made unreadable would read as a keychain
+		// with no certificates in it, the sweep would be declared complete, and
+		// every certificate the machine serves would be marked as removed.
+		if _, statErr := os.Stat(keychain); statErr != nil {
+			failures = append(failures, storeFailure{Store: keychain, Err: statErr})
+			continue
 		}
 
 		out, err := runSecurity(ctx, "find-certificate", "-a", "-p", keychain)

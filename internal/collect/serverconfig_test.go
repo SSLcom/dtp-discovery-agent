@@ -47,6 +47,13 @@ func collectApache(t *testing.T, root, main string) Result {
 	return c.Collect(context.Background())
 }
 
+// inConfig is a path as the FIXTURE wrote it into the configuration file, which
+// is what the collector reports back. filepath.Join would produce backslashes on
+// Windows and compare them against the forward slashes the configuration
+// actually contains — failing over a difference that is the test's, not the
+// agent's.
+func inConfig(root, rel string) string { return root + "/" + rel }
+
 func onlyObservation(t *testing.T, res Result) Observation {
 	t.Helper()
 	if len(res.Observations) != 1 {
@@ -105,7 +112,7 @@ server {
 	}
 	// The configuration NAMES the key. That is better than the file collector's
 	// guess from a matching filename, and it is most of why this source exists.
-	if obs.PrivateKeyLocation != filepath.Join(root, "ssl/example.key") {
+	if obs.PrivateKeyLocation != inConfig(root, "ssl/example.key") {
 		t.Errorf("private key location = %q", obs.PrivateKeyLocation)
 	}
 	if !obs.PrivateKeyPresent {
@@ -134,7 +141,7 @@ http {
 	writeKey(t, filepath.Join(root, "ssl/shared.key"))
 
 	obs := onlyObservation(t, collectNginx(t, root, "nginx.conf"))
-	if obs.Binding["certificate_file"] != filepath.Join(root, "ssl/shared.pem") {
+	if obs.Binding["certificate_file"] != inConfig(root, "ssl/shared.pem") {
 		t.Errorf("the inherited certificate was not found: %v", obs.Binding)
 	}
 }
@@ -162,7 +169,7 @@ http {
 	writeKey(t, filepath.Join(root, "ssl/own.key"))
 
 	obs := onlyObservation(t, collectNginx(t, root, "nginx.conf"))
-	if obs.Binding["certificate_file"] != filepath.Join(root, "ssl/own.pem") {
+	if obs.Binding["certificate_file"] != inConfig(root, "ssl/own.pem") {
 		t.Errorf("the site's own certificate should win: %v", obs.Binding)
 	}
 }
@@ -334,7 +341,7 @@ IncludeOptional sites-enabled/*.conf
 	if want := "www.example.com example.com static.example.com"; obs.Binding["server_names"] != want {
 		t.Errorf("server_names = %q, want %q", obs.Binding["server_names"], want)
 	}
-	if obs.PrivateKeyLocation != filepath.Join(root, "ssl/example.key") {
+	if obs.PrivateKeyLocation != inConfig(root, "ssl/example.key") {
 		t.Errorf("private key location = %q", obs.PrivateKeyLocation)
 	}
 }
@@ -390,7 +397,7 @@ func TestApacheJoinsContinuedLines(t *testing.T) {
 	writeLeaf(t, filepath.Join(root, "ssl/continued.pem"), "continued.example.com")
 
 	obs := onlyObservation(t, collectApache(t, root, "httpd.conf"))
-	if obs.Binding["certificate_file"] != filepath.Join(root, "ssl/continued.pem") {
+	if obs.Binding["certificate_file"] != inConfig(root, "ssl/continued.pem") {
 		t.Errorf("a continued directive was not joined: %v", obs.Binding)
 	}
 }
@@ -433,9 +440,7 @@ http {
 // tell an operator a certificate disappeared from a host where it is sitting
 // exactly where it always was.
 func TestAConfiguredCertificateThatCannotBeReadStopsTheSweep(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read anything, so this cannot be shown here")
-	}
+	requireUnprivileged(t)
 	root := tree(t, map[string]string{
 		"nginx.conf": `
 http {
@@ -511,5 +516,36 @@ func TestServerNamesIgnoreOtherSources(t *testing.T) {
 	}})
 	if len(names) != 0 {
 		t.Errorf("only the configuration knows a site's names, got %v", names)
+	}
+}
+
+// A backslash in a quoted nginx string. nginx itself drops it before ANYTHING,
+// so `"C:\Users\nginx\ssl\site.pem"` reads there as `C:Usersnginxsslsite.pem`.
+// This agent deliberately stops short of that: its job is to find the file, a
+// Windows path is the only place the difference shows, and reading it nginx's
+// way turns every quoted path on a Windows host into a "configured certificate
+// is missing" alarm about a site that is serving perfectly.
+//
+// The tokeniser is exercised directly so the rule is checked on every platform
+// rather than only on the one where it matters.
+func TestABackslashIsOnlyAnEscapeWhereItMeansSomething(t *testing.T) {
+	cases := map[string]string{
+		`ssl_certificate "C:\Users\nginx\ssl\site.pem";`: `C:\Users\nginx\ssl\site.pem`,
+		// The characters a backslash IS meaningful before still work, which is
+		// the whole reason the escape exists.
+		`ssl_certificate "a \"quoted\" name.pem";`: `a "quoted" name.pem`,
+		`ssl_certificate "costs \$5.pem";`:         `costs $5.pem`,
+		`ssl_certificate "back\\slash.pem";`:       `back\slash.pem`,
+	}
+	for directive, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			tokens := nginxTokenize(directive)
+			if len(tokens) < 2 {
+				t.Fatalf("got %d tokens from %q", len(tokens), directive)
+			}
+			if tokens[1].text != want {
+				t.Errorf("got %q, want %q", tokens[1].text, want)
+			}
+		})
 	}
 }

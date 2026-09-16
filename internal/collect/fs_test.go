@@ -199,6 +199,7 @@ func TestCombinedFileReportsTheCertificateAndFlagsTheKey(t *testing.T) {
 // so the obvious-looking formatting produced "0rw-r--r--" — a value that is not
 // a mode at all and that no one reading the portfolio could act on.
 func TestFileModeIsReportedAsOctal(t *testing.T) {
+	requireUnixPermissions(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "site.pem")
 	writeLeaf(t, path, "mode.example.com")
@@ -216,6 +217,7 @@ func TestFileModeIsReportedAsOctal(t *testing.T) {
 }
 
 func TestFileModeReportsATightenedFile(t *testing.T) {
+	requireUnixPermissions(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tight.pem")
 	writeLeaf(t, path, "tight.example.com")
@@ -327,4 +329,59 @@ func makeCert(t *testing.T, cn string, isCA bool) []byte {
 		t.Fatal(err)
 	}
 	return der
+}
+
+// caSignedLeaf is an end-entity certificate ISSUED BY somebody else, so its
+// subject and issuer differ — which is what a real server certificate looks
+// like and what a self-signed one does not.
+func caSignedLeaf(t *testing.T) *x509.Certificate { return issuedByACA(t, false) }
+
+// caSignedIntermediate is a CA certificate somebody else issued, so it is an
+// anchor that the self-signed test cannot catch.
+func caSignedIntermediate(t *testing.T) *x509.Certificate { return issuedByACA(t, true) }
+
+func issuedByACA(t *testing.T, isCA bool) *x509.Certificate {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Issuing CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "www.example.com"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  isCA,
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
 }

@@ -189,9 +189,7 @@ func TestAPartlyReadableKeystoreReportsWhatItGotAndStopsTheSweep(t *testing.T) {
 }
 
 func TestAKeystoreThatCannotBeReadStopsTheSweep(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read anything, so this cannot be shown here")
-	}
+	requireUnprivileged(t)
 	root := t.TempDir()
 	path := keystoreFixture(t, "real.jks", root)
 	if err := os.Chmod(path, 0o000); err != nil {

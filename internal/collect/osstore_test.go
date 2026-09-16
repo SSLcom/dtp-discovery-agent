@@ -73,7 +73,7 @@ func TestTrustAnchorsInAStoreAreNotDeployments(t *testing.T) {
 // machine where they are sitting untouched.
 func TestAStoreThatWouldNotOpenStopsTheSweep(t *testing.T) {
 	withStores(t, func(context.Context, []string) ([]storeEntry, []storeFailure, error) {
-		return []storeEntry{{Store: `LocalMachine\My`, Certificate: certFor(t, "www.example.com", false)}},
+		return []storeEntry{{Store: `LocalMachine\My`, Certificate: certFor(t, "www.example.com", false), HasPrivateKey: true}},
 			[]storeFailure{{Store: `LocalMachine\WebHosting`, Err: errors.New("access is denied")}}, nil
 	})
 
@@ -152,4 +152,41 @@ func TestIdentityListingIsReadForItsThumbprints(t *testing.T) {
 
 func errNoOSStoreForTest() error {
 	return errors.New("this platform has no operating system certificate store")
+}
+
+// basicConstraints alone is not enough to recognise a trust anchor, and this
+// was measured rather than reasoned about: on a Windows runner, fourteen
+// certificates in LocalMachine\Root carry no basicConstraints extension at all,
+// so Go reports IsCA false for every one of them. Without a second test they
+// would arrive in a member's portfolio as deployed certificates, from every
+// Windows host they own.
+//
+// The private key is what tells the two apart. Internal infrastructure is full
+// of self-signed SERVER certificates, and a machine holding the key for one is
+// serving it.
+func TestASelfSignedCertificateIsAnAnchorOrADeploymentAccordingToTheKey(t *testing.T) {
+	selfSignedNoKey := storeEntry{
+		Store: `LocalMachine\Root`, Certificate: certFor(t, "An Old Root", false),
+	}
+	if !trustAnchor(selfSignedNoKey) {
+		t.Error("a self-signed certificate this machine has no key for is an issuer it believes, not something it serves")
+	}
+
+	selfSignedWithKey := selfSignedNoKey
+	selfSignedWithKey.HasPrivateKey = true
+	if trustAnchor(selfSignedWithKey) {
+		t.Error("a self-signed certificate this machine holds the key for is deployed on it")
+	}
+
+	// And the ordinary case stays ordinary. An INTERMEDIATE is the one that
+	// needs saying: it is a CA and it is not self-signed, so only the
+	// basicConstraints test catches it. A self-signed root would be caught by
+	// the rule above and would let that test pass for the wrong reason.
+	intermediate := caSignedIntermediate(t)
+	if !trustAnchor(storeEntry{Certificate: intermediate}) {
+		t.Error("an intermediate CA is an anchor, not something this machine serves")
+	}
+	if trustAnchor(storeEntry{Certificate: caSignedLeaf(t), HasPrivateKey: true}) {
+		t.Error("a certificate issued by somebody else is not an anchor")
+	}
 }

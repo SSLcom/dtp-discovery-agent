@@ -336,6 +336,15 @@ Collectors shipped: filesystem, Java keystores, the Windows certificate store
 and macOS keychain, nginx and Apache configuration, IIS, and the local TLS
 listener probe.
 
+**On Windows the agent's own private key is not protected by file permissions.**
+It is written with a 0600 chmod and its state directory with 0700, and on
+Windows both calls succeed while doing nothing — there are no mode bits, and
+`os.Chmod` can only toggle the read-only attribute. The key is therefore left
+with whatever the parent directory's ACL grants, which under `%ProgramData%`
+usually includes read access for local users. Protecting it properly means
+setting an ACL, which is not built. The tests that assert on modes skip there
+rather than pretending, and say so in `internal/state/permissions_test.go`.
+
 **NSS databases are deliberately not collected.** Reading `cert9.db` means either
 a SQLite dependency several times the size of this binary, or shelling out to
 `certutil`, which is not installed on the machines that would have one. The

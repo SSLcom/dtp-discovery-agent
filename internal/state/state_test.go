@@ -32,6 +32,7 @@ func TestKeyIsGeneratedOnceAndReused(t *testing.T) {
 }
 
 func TestKeyIsWrittenOwnerOnly(t *testing.T) {
+	requireUnixPermissions(t)
 	dir := t.TempDir()
 	store, _ := Open(dir)
 	if _, err := store.LoadOrCreateKey(); err != nil {
@@ -170,6 +171,7 @@ func TestNoLastRunIsNotAnError(t *testing.T) {
 // agent would go on using it, and re-securing the directory around it, while
 // the private key itself stayed world-readable.
 func TestAnExistingLooseKeyIsTightenedOnLoad(t *testing.T) {
+	requireUnixPermissions(t)
 	dir := t.TempDir()
 	store, err := Open(dir)
 	if err != nil {

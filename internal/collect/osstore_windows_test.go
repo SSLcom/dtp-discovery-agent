@@ -4,6 +4,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,14 +91,19 @@ func TestFindsACertificateThisMachineHoldsTheKeyFor(t *testing.T) {
 	}
 
 	const subject = "dtp-agent-test.invalid"
-	thumb, err := powershell(fmt.Sprintf(
-		`$c = New-SelfSignedCertificate -Subject "CN=%s" -CertStoreLocation Cert:\CurrentUser\My `+
+	out, err := powershell(fmt.Sprintf(
+		`$ErrorActionPreference = "Stop"; `+
+			`$c = New-SelfSignedCertificate -Subject "CN=%s" -CertStoreLocation Cert:\CurrentUser\My `+
 			`-FriendlyName "dtp-agent test certificate" -NotAfter (Get-Date).AddDays(1); `+
 			`$c.Thumbprint`, subject))
-	if err != nil {
-		t.Skipf("could not create a test certificate: %v", err)
+	thumb := strings.ToUpper(strings.TrimSpace(out))
+	// Both halves matter. An empty thumbprint with no error means the cmdlet
+	// ran and produced nothing, and the earlier version of this test read that
+	// as "the certificate was not found" — a failure that says nothing about
+	// what actually went wrong.
+	if err != nil || len(thumb) != 40 {
+		t.Fatalf("could not create a test certificate (err %v, output %q)", err, out)
 	}
-	thumb = strings.ToUpper(strings.TrimSpace(thumb))
 	t.Cleanup(func() {
 		_, _ = powershell(fmt.Sprintf(`Remove-Item -Path Cert:\CurrentUser\My\%s -Force`, thumb))
 	})
@@ -124,6 +130,12 @@ func TestFindsACertificateThisMachineHoldsTheKeyFor(t *testing.T) {
 }
 
 func powershell(script string) (string, error) {
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		// Whatever PowerShell complained about, rather than "exit status 1".
+		return strings.TrimSpace(string(exitErr.Stderr)), err
+	}
 	return string(out), err
 }
