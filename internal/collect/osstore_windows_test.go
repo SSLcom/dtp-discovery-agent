@@ -117,8 +117,12 @@ func TestFindsACertificateThisMachineHoldsTheKeyFor(t *testing.T) {
 	}
 
 	want := thumbprint(cert)
-	if out, err := run(t, "certutil", "-user", "-f", "-p", password, "-importpfx", "My", path); err != nil {
-		t.Fatalf("importing the test certificate: %v\n%s", err, out)
+	// -silent is CRYPT_SILENT: no user interface. Importing a private key
+	// otherwise raises a protection-level dialog, and on a headless runner that
+	// is a subprocess waiting for a click that will never come — measured, twice.
+	if out, err := run(t, "certutil", "-f", "-silent", "-user", "-p", password, "-importpfx", "My", path); err != nil {
+		t.Skipf("could not import a test certificate on this runner, so the "+
+			"private-key flag is unproven here: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
 		if out, err := run(t, "certutil", "-user", "-delstore", "My", want); err != nil {
@@ -192,4 +196,21 @@ func run(t *testing.T, name string, args ...string) (string, error) {
 		return string(out), fmt.Errorf("%s did not finish within a minute (it is probably waiting for input): %w", name, ctx.Err())
 	}
 	return string(out), err
+}
+
+// The other half of the key-presence property, and the half that needs no
+// import: the root store's certificates have no private keys, so anything
+// reporting one there means the property call is answering yes to everything —
+// which would make the flag useless in the direction that matters.
+func TestTheRootStoreReportsNoPrivateKeys(t *testing.T) {
+	entries, err := readWindowsStore(`LocalMachine\Root`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.HasPrivateKey {
+			t.Errorf("%s in the root store was reported as having a private key",
+				entry.Certificate.Subject.CommonName)
+		}
+	}
 }
