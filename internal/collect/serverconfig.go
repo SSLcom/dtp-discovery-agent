@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -238,7 +239,15 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			continue
 		}
 
-		chain := parsed.Certificates[1:]
+		// A configured certificate is reported WHATEVER it holds. Unlike a file
+		// the agent merely came across, this one is what the site presents — so
+		// if someone has pointed ssl_certificate at a chain file, that is a
+		// finding rather than something to skip. The leaf is still preferred
+		// where there is one, because bundles are not reliably ordered.
+		leaf, chain, found := parse.Leaf(parsed.Certificates)
+		if !found {
+			leaf, chain = parsed.Certificates[0], parsed.Certificates[1:]
+		}
 		// Apache before 2.4.8 kept the intermediates in a separate file. Read
 		// it if the configuration named one: a chain the agent can see is a
 		// chain DTP can check, and a missing intermediate is its own outage.
@@ -266,7 +275,7 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 		}
 
 		res.Observations = append(res.Observations, Observation{
-			CertificatePEM: parse.EncodePEM(parsed.Certificates[:1]),
+			CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
 			ChainPEM:       parse.EncodePEM(chain),
 			Source:         SourceServerConfig,
 			Location:       host.location(),

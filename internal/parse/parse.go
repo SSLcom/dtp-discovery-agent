@@ -135,3 +135,38 @@ func EncodePEM(certs []*x509.Certificate) string {
 	}
 	return out.String()
 }
+
+// Leaf picks the end-entity certificate out of what a store held, with
+// everything else as its chain — and reports whether there was one at all.
+//
+// TAKING THE FIRST CERTIFICATE IS NOT GOOD ENOUGH, for two separate reasons.
+//
+// Order is not guaranteed. A bundle is a concatenation, and plenty of tools
+// write the chain before the certificate it belongs to. Reporting an
+// intermediate as the deployed certificate gives an operator the wrong expiry
+// date for the thing that will actually break.
+//
+// And a file may hold no end-entity certificate at all. That is what a TRUST
+// STORE is — /etc/ssl/certs/ca-certificates.crt, a JDK cacerts, a chain file on
+// its own — and they are everywhere. Treating one as a deployment reports a CA
+// root nobody chose, carrying a hundred and twenty others as its "chain", from
+// every host in an estate. It is not a deployment, it is the list of issuers a
+// machine is willing to believe, and mixing the two buries the certificates a
+// member is actually paying to keep track of.
+//
+// So `found` is false for a store of nothing but CA certificates, and the
+// caller decides. A collector reading a file it merely came across skips it. A
+// collector reading a file a web server was CONFIGURED to serve reports it
+// anyway, because whatever is in there is what that site presents.
+func Leaf(certs []*x509.Certificate) (leaf *x509.Certificate, chain []*x509.Certificate, found bool) {
+	for i, cert := range certs {
+		if cert.IsCA {
+			continue
+		}
+		chain = make([]*x509.Certificate, 0, len(certs)-1)
+		chain = append(chain, certs[:i]...)
+		chain = append(chain, certs[i+1:]...)
+		return cert, chain, true
+	}
+	return nil, nil, false
+}

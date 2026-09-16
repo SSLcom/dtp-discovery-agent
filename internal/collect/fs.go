@@ -191,13 +191,20 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result) {
 		keyPath = sibling
 	}
 
-	// The LEAF is the observation; the rest is its chain. The server strips a
-	// duplicate leaf from a supplied chain, but sending it clean is cheaper and
-	// leaves less to disagree about.
-	leaf := parsed.Certificates[0]
+	// The LEAF is the observation; the rest is its chain.
+	//
+	// A file with no end-entity certificate in it is a TRUST STORE, not a
+	// deployment — ca-certificates.crt, a chain file on its own — and this walk
+	// goes through the directories those live in. Reporting one would send a CA
+	// root nobody chose, with a hundred others as its chain, from every host in
+	// an estate, and bury the certificates a member is paying to track.
+	leaf, chain, found := parse.Leaf(parsed.Certificates)
+	if !found {
+		return
+	}
 	res.Observations = append(res.Observations, Observation{
 		CertificatePEM:     parse.EncodePEM([]*x509.Certificate{leaf}),
-		ChainPEM:           parse.EncodePEM(parsed.Certificates[1:]),
+		ChainPEM:           parse.EncodePEM(chain),
 		Source:             SourceFile,
 		Location:           path,
 		PrivateKeyPresent:  keyPath != "",

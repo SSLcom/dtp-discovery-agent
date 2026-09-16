@@ -80,8 +80,11 @@ func TestADisabledSourceDoesNotRun(t *testing.T) {
 			t.Errorf("%s ran although it was disabled", r.Source)
 		}
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected only the file collector to have run, got %d results", len(results))
+	// Derived from the collector list rather than written as a number, so
+	// adding a collector does not quietly turn this into an assertion about
+	// something else.
+	if want := len(Names()) - 2; len(results) != want {
+		t.Fatalf("got %d results, want the %d sources that were not disabled", len(results), want)
 	}
 	// A disabled source is never DECLARED complete either, which is what makes
 	// turning one off leave its past findings stale rather than retiring them.

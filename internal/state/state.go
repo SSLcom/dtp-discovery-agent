@@ -49,6 +49,12 @@ type Config struct {
 	MaxFileBytes int64    `json:"max_file_bytes,omitempty"`
 	MaxDepth     int      `json:"max_depth,omitempty"`
 
+	// Directories to search for Java keystores, for an application installed
+	// somewhere the defaults do not look — /srv/myapp/conf, which is where a
+	// great many of them actually are. Empty means the usual JDK and Java
+	// service locations for this platform.
+	KeystoreRoots []string `json:"keystore_roots,omitempty"`
+
 	// Web server configurations to read, for a host that keeps them somewhere
 	// the defaults do not look — a nginx built from source into /opt, say.
 	// Empty means the usual locations for this platform.
