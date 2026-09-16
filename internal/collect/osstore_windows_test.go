@@ -199,17 +199,47 @@ func run(t *testing.T, name string, args ...string) (string, error) {
 }
 
 // The other half of the key-presence property, and the half that needs no
-// import: the root store's certificates have no private keys, so anything
-// reporting one there means the property call is answering yes to everything —
-// which would make the flag useless in the direction that matters.
-func TestTheRootStoreReportsNoPrivateKeys(t *testing.T) {
+// import: the property call must not answer YES to everything. If it did, the
+// flag would be useless in exactly the direction that matters — a trust anchor
+// and a certificate this machine serves would look alike again.
+//
+// It cannot assert that NOTHING in the root store has a key, which is what an
+// earlier version tried. Measured on the runner: two certificates there DO —
+// "runnervmvmocb" and "pkrvm7vbgcyd9ga", the machine's own self-signed WinRM and
+// RDP certificates, which whoever built the image dropped into Root.
+//
+// That is worth more than the assertion it replaced, because those two are
+// precisely the certificates that defeat both content-based rules: self-signed,
+// no basicConstraints, and holding a private key. Nothing about them says they
+// are anchors. Only the store they are in does — which is why that rule exists.
+func TestThePrivateKeyFlagDistinguishesRatherThanAgrees(t *testing.T) {
 	entries, err := readWindowsStore(`LocalMachine\Root`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(entries) < 5 {
+		t.Skipf("only %d certificates in the root store; too few to say anything", len(entries))
+	}
+
+	withKey := 0
 	for _, entry := range entries {
 		if entry.HasPrivateKey {
-			t.Errorf("%s in the root store was reported as having a private key",
+			withKey++
+		}
+	}
+	// A real root store is overwhelmingly certificates nobody here holds a key
+	// for. If most of them claim one, the property is not being read.
+	if withKey*2 >= len(entries) {
+		t.Errorf("%d of %d certificates in the root store claim a private key; "+
+			"the property call is answering yes to everything", withKey, len(entries))
+	}
+
+	// And every one of them is still an anchor, whatever its key says — which is
+	// the rule those two machine certificates would otherwise walk straight
+	// through.
+	for _, entry := range entries {
+		if !trustAnchor(entry) {
+			t.Errorf("%s in the root store was not treated as an anchor",
 				entry.Certificate.Subject.CommonName)
 		}
 	}
