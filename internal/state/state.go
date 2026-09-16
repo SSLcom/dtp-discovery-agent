@@ -48,6 +48,16 @@ type Config struct {
 	ScanRoots    []string `json:"scan_roots,omitempty"`
 	MaxFileBytes int64    `json:"max_file_bytes,omitempty"`
 	MaxDepth     int      `json:"max_depth,omitempty"`
+
+	// Sources this host will not collect, by their DTP source name. The agent
+	// runs on machines its owner is answerable for, and not every owner wants
+	// every source: probing local TLS listeners opens connections to live
+	// services, which is a thing a security team may reasonably forbid even
+	// though it is the single most useful signal the agent produces.
+	//
+	// A disabled source is never declared complete, so turning one off makes
+	// its past findings go stale rather than making them disappear.
+	DisabledSources []string `json:"disabled_sources,omitempty"`
 }
 
 // Store is the agent's state directory.

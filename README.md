@@ -32,9 +32,9 @@ because it is the one failure that cannot be walked back:
 ## Commands
 
 ```
-dtp-agent enroll --server URL --account ID [--token TOKEN] [--root DIR]
-dtp-agent scan [--root DIR] [--json]     # print findings, upload nothing
-dtp-agent run [--once] [--root DIR]      # scan and upload
+dtp-agent enroll --server URL --account ID [--token TOKEN] [--root DIR] [--without SOURCE]
+dtp-agent scan [--root DIR] [--without SOURCE] [--json]   # print, upload nothing
+dtp-agent run [--once] [--root DIR] [--without SOURCE]   # scan and upload
 dtp-agent status                         # what this agent is and last did
 dtp-agent version
 ```
@@ -50,6 +50,8 @@ open.
 
 ## What it scans
 
+### Files (`file`)
+
 Bounded by default, because this runs unattended on machines nobody is
 watching. The defaults cover the usual TLS locations (`/etc/ssl`, `/etc/pki`,
 `/etc/nginx`, `/etc/letsencrypt`, …), cap files at 1 MiB and depth at 8, do not
@@ -60,6 +62,42 @@ this product exists to prevent.
 
 Recognised today: PEM and DER certificate files, and PKCS#12 bundles with an
 empty password. The agent never guesses at a password.
+
+### Local TLS listeners (`listener`)
+
+**This is the only source that reports what is actually being served**, and the
+difference is the whole point: a certificate renewed into `/etc/ssl` an hour ago
+protects nobody if nothing reloaded, and every other source calls that host
+healthy.
+
+The agent reads its own listening sockets from `/proc/net/tcp` and
+`/proc/net/tcp6`, opens a TLS connection to each, takes the certificate and
+closes it. **It sends no application data — not a byte.** A probe that spoke the
+application protocol to whatever answered would be a scanner, not an inventory.
+
+Three things it deliberately does:
+
+- **Accepts certificates no client would.** Expired, self-signed, issued for
+  another name: those are the findings. Verifying would discard them.
+- **Reports the certificate of a listener that refuses it.** A mutually
+  authenticated service rejects the agent for having no client certificate — but
+  by then it has presented its own, and that expiry is a fact an operator needs
+  whether or not the agent was let in.
+- **Speaks down to TLS 1.0.** Forgotten listeners are old listeners.
+
+Ports that serve something other than TLS are silent, not errors: a host is full
+of them. A listener the agent could *not* finish talking to is reported and
+stops the sweep counting as complete, because a certificate it could not see is
+not one that was removed.
+
+On Windows and macOS the agent cannot yet read the socket table, so it probes a
+well-known port list instead — and, because a guess is not a sweep, never
+declares this source complete there.
+
+**Turning it off:** `--without listener`, at enrolment (recorded in the config)
+or on a single `scan`/`run`. Probing local services is a thing a security team
+may reasonably forbid. A disabled source is never declared complete, so turning
+one off makes its past findings go stale rather than making them disappear.
 
 ## The protocol, and the two fields that fail silently
 
@@ -185,9 +223,14 @@ dtp-agent run --once --state /tmp/agent-state
 generating a CSR on the host, and the command queue are v2 — designed for in
 the server's `AgentCommand` shape, not built.
 
-Collectors shipped: filesystem. Planned: local listener probe, nginx/Apache/IIS
-config parsing, OS and application trust stores (Windows store, macOS keychain,
-NSS, Java keystores).
+Collectors shipped: filesystem, local TLS listener probe. Planned:
+nginx/Apache/IIS config parsing, OS and application trust stores (Windows store,
+macOS keychain, NSS, Java keystores).
+
+The listener probe sends SNI for any name it is given, which is how the other
+twenty sites on a name-based virtual host become visible — a probe without SNI
+gets only the default certificate. Nothing supplies those names yet; the
+server-config collector is what will.
 
 Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
 systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service
