@@ -12,8 +12,18 @@ permissions:
   contents: read
 
 jobs:
+  # ON ALL THREE PLATFORMS, not only Linux. Several collectors exist ONLY on one
+  # of them — the Windows certificate store is crypt32 syscalls, the macOS
+  # keychain is a subprocess — and cross-compiling proves those files parse, not
+  # that they work. Code that ships to a customer's servers having never once
+  # been executed is code nobody has tested, and the first person to run it
+  # would be them.
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -26,7 +36,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Once is enough, and it is a Unix shell script.
       - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
         run: |
           unformatted="$(gofmt -l .)"
           [ -z "$unformatted" ] || { echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1; }

@@ -193,6 +193,16 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 			}
 		}
 	}
+
+	// IIS, which is read differently from the others because it IS different:
+	// a site's certificate is not in its configuration file but in HTTP.sys and
+	// the certificate store, so there is no path to open and parse.
+	observations, problems, complete := iisObservations()
+	res.Observations = append(res.Observations, observations...)
+	res.Errors = append(res.Errors, problems...)
+	if !complete {
+		res.Completed = false
+	}
 	return res
 }
 

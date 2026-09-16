@@ -11,6 +11,7 @@ import (
 type Options struct {
 	File         Bounds
 	Keystores    KeystoreBounds
+	OSStore      []string
 	ServerConfig ServerConfigBounds
 	Listener     ListenerBounds
 
@@ -35,6 +36,7 @@ func All(opts Options) []Collector {
 	return []Collector{
 		&FS{Bounds: opts.File},
 		&Keystores{Bounds: opts.Keystores},
+		&OSStore{Stores: opts.OSStore},
 		&ServerConfig{Bounds: opts.ServerConfig},
 		&Listener{Bounds: opts.Listener},
 	}

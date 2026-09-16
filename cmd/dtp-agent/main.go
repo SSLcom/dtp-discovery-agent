@@ -254,7 +254,12 @@ func cmdScan(ctx context.Context, args []string) error {
 		for _, e := range r.Errors {
 			fmt.Printf("  %-13s %s: %s\n", "!", e.Location, e.Error)
 		}
-		if !r.Completed {
+		// Only worth saying when the collector actually had something to
+		// report. A source that found nothing AND said nothing did not "fail to
+		// finish" in any sense a reader could act on — on Linux, os_store is
+		// simply not a thing, and printing a warning about it on every scan
+		// teaches people to ignore the warnings that matter.
+		if !r.Completed && (len(r.Observations) > 0 || len(r.Errors) > 0) {
 			fmt.Printf("  %-13s the %s collector did not finish; nothing it found will be marked absent\n", "note", r.Source)
 		}
 	}
