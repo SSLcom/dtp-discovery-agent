@@ -114,6 +114,11 @@ func extractSigningRecipe(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("reading PROTOCOL.md: %v", err)
 	}
+	// Git hands this file to a Windows checkout with CRLF line endings, and the
+	// signed string is defined by its CONTENT, not by how the repository was
+	// cloned. Without this the test fails on Windows and on nobody else's
+	// machine, over a difference that no client would ever see.
+	raw = []byte(strings.ReplaceAll(string(raw), "\r\n", "\n"))
 
 	var found []string
 	for _, block := range strings.Split(string(raw), "```")[1:] {

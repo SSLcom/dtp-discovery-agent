@@ -95,6 +95,46 @@ expiring. A `cacerts` contributes nothing, by the trust-store rule above.
 PKCS#12 keystores — what `keytool` has written by default since JDK 9 — are read
 too, when they open with an empty password.
 
+### The operating system's own store (`os_store`)
+
+**On Windows a certificate does not live in a file.** IIS, SQL Server, RDP and
+WinRM all bind to a store entry, so there is no PEM on the disk for a
+file-walking collector to find — every other source reports a Windows web server
+as a machine with no certificates on it. Read through `crypt32` directly, with no
+cgo, opening each store read-only.
+
+On macOS the system keychain, read through `/usr/bin/security`. A subprocess is
+not this agent's habit; the alternatives are cgo, which would end the single
+portable static binary, or parsing an undocumented file format.
+
+Both report **whether this machine holds the private key**, which is the only
+thing separating a certificate a service can serve from one somebody imported to
+trust — on Windows they sit in the same kind of store. The hundreds of trust
+anchors that come back with them are dropped by the same rule that drops a
+`cacerts`.
+
+Linux has no such store. `/etc/ssl/certs` is files, which the filesystem
+collector already reads; reporting them again here would give a member two rows
+to reconcile for one certificate.
+
+### IIS (`server_config`)
+
+IIS keeps a site's certificate **nowhere near its configuration**, and that
+shapes the whole implementation. `applicationHost.config` lists the sites and
+their bindings and stops there; the certificate a binding presents is held by
+HTTP.sys, in the registry, as a thumbprint into a certificate store. So a site's
+certificate is three things joined — the configuration file for its *name*, the
+registry for its *thumbprint*, and the store for the certificate itself.
+
+The most specific binding is looked up first. On a host with twenty sites behind
+one address the address-only entry is the *fallback* certificate, and reaching
+for it first would report all twenty sites as serving it while the nineteen real
+certificates stayed invisible — the same failure as probing a listener without
+SNI.
+
+An https binding HTTP.sys has no certificate for is **reported**: that is not
+the agent failing to look, it is a site that will not serve.
+
 ### Web server configuration (`server_config`)
 
 **The only source that knows which *site* a certificate belongs to.** The file
@@ -292,10 +332,25 @@ dtp-agent run --once --state /tmp/agent-state
 generating a CSR on the host, and the command queue are v2 — designed for in
 the server's `AgentCommand` shape, not built.
 
-Collectors shipped: filesystem, Java keystores, nginx and Apache configuration,
-local TLS listener probe. Planned: IIS configuration and the OS trust stores
-(Windows store, macOS keychain, NSS) — IIS depends on the Windows store, since a
-binding names only a thumbprint.
+Collectors shipped: filesystem, Java keystores, the Windows certificate store
+and macOS keychain, nginx and Apache configuration, IIS, and the local TLS
+listener probe.
+
+**On Windows the agent's own private key is not protected by file permissions.**
+It is written with a 0600 chmod and its state directory with 0700, and on
+Windows both calls succeed while doing nothing — there are no mode bits, and
+`os.Chmod` can only toggle the read-only attribute. The key is therefore left
+with whatever the parent directory's ACL grants, which under `%ProgramData%`
+usually includes read access for local users. Protecting it properly means
+setting an ACL, which is not built. The tests that assert on modes skip there
+rather than pretending, and say so in `internal/state/permissions_test.go`.
+
+**NSS databases are deliberately not collected.** Reading `cert9.db` means either
+a SQLite dependency several times the size of this binary, or shelling out to
+`certutil`, which is not installed on the machines that would have one. The
+technology it serves on a server — `mod_nss` — has been superseded by `mod_ssl`,
+and a Firefox profile is not a certificate deployment. It is listed here rather
+than left unsaid: if an estate turns out to need it, the cost is known.
 
 Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
 systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service
