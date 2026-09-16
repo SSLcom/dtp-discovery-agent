@@ -49,6 +49,12 @@ type Config struct {
 	MaxFileBytes int64    `json:"max_file_bytes,omitempty"`
 	MaxDepth     int      `json:"max_depth,omitempty"`
 
+	// Web server configurations to read, for a host that keeps them somewhere
+	// the defaults do not look — a nginx built from source into /opt, say.
+	// Empty means the usual locations for this platform.
+	NginxConfigs  []string `json:"nginx_configs,omitempty"`
+	ApacheConfigs []string `json:"apache_configs,omitempty"`
+
 	// Sources this host will not collect, by their DTP source name. The agent
 	// runs on machines its owner is answerable for, and not every owner wants
 	// every source: probing local TLS listeners opens connections to live
