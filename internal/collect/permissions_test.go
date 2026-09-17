@@ -12,11 +12,12 @@ import (
 // Go reports every file as 0666, and a file "chmodded" to 0000 stays perfectly
 // readable. A test that asserts on a mode there is asserting on nothing.
 //
-// THE PRODUCT CONSEQUENCE IS REAL AND IS NOT FIXED BY SKIPPING A TEST. The
-// agent protects its own private key with a 0600 chmod, which on Windows does
-// nothing at all; protecting it there needs an ACL, and that is not built. It is
-// recorded in the README under what is not done rather than hidden behind a
-// green suite.
+// What this skips is a way of CHECKING, not a guarantee. The file modes this
+// collector reports are Unix ones and simply have no Windows meaning — a
+// member reading a portfolio does not need to be told every file there is
+// 0666. Where a mode carries a real guarantee, which is the agent's own private
+// key, Windows gets an ACL instead and internal/state/secure_windows_test.go
+// checks it in that platform's own terms.
 func requireUnixPermissions(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {

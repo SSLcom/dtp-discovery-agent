@@ -12,16 +12,14 @@ import (
 // perfectly readable — so an assertion about a mode is an assertion about
 // nothing.
 //
-// THE GAP THIS LEAVES IS REAL, AND SKIPPING THE TEST DOES NOT CLOSE IT. The
-// agent protects its own private key with a 0600 chmod and its state directory
-// with 0700. On Windows both calls succeed and neither does anything, so the
-// key is left with whatever the parent directory's ACL grants — which under
-// %ProgramData% usually includes read access for every local user. Protecting it
-// properly there means setting an ACL, which is not built. It is written down in
-// the README under what is not done, rather than left implied by a green suite.
+// THE GUARANTEE ITSELF IS NOT SKIPPED, only this way of checking it. What a
+// 0600 means on Unix, an ACL means on Windows, and secure_windows_test.go
+// asserts the same property in the terms that platform actually has: a
+// directory any user could read is closed, the list is detached from its
+// parent's, and the agent can still read its own key.
 func requireUnixPermissions(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no Unix permission bits; see the note in permissions_test.go")
+		t.Skip("Windows expresses this as an ACL; see secure_windows_test.go")
 	}
 }

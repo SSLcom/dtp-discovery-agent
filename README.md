@@ -16,6 +16,15 @@ authenticated by a detached signature over an assertion. DTP stores no secret
 for this agent, so revoking it is a status flip on the server rather than a
 rotation here, and a dump of the server's tables grants nobody anything.
 
+Which puts the whole weight on the key staying where it was put. It is written
+`0600` in a `0700` directory, and **tightened on every open** rather than only at
+creation — a key restored from a backup or laid down by a configuration tool
+arrives with whatever permissions it arrives with. On **Windows**, where there
+are no mode bits and `os.Chmod` succeeds without changing who may read anything,
+the same intent is an ACL: full control for this agent, SYSTEM and the
+administrators, and **inheritance broken**, so the read access `%ProgramData%`
+hands to every local user by default stops applying.
+
 **It never transmits private key material.** That is enforced three times over,
 because it is the one failure that cannot be walked back:
 
@@ -335,15 +344,6 @@ the server's `AgentCommand` shape, not built.
 Collectors shipped: filesystem, Java keystores, the Windows certificate store
 and macOS keychain, nginx and Apache configuration, IIS, and the local TLS
 listener probe.
-
-**On Windows the agent's own private key is not protected by file permissions.**
-It is written with a 0600 chmod and its state directory with 0700, and on
-Windows both calls succeed while doing nothing — there are no mode bits, and
-`os.Chmod` can only toggle the read-only attribute. The key is therefore left
-with whatever the parent directory's ACL grants, which under `%ProgramData%`
-usually includes read access for local users. Protecting it properly means
-setting an ACL, which is not built. The tests that assert on modes skip there
-rather than pretending, and say so in `internal/state/permissions_test.go`.
 
 **NSS databases are deliberately not collected.** Reading `cert9.db` means either
 a SQLite dependency several times the size of this binary, or shelling out to
