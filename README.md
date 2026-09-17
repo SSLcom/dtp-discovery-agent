@@ -212,7 +212,7 @@ SNI. That ordering is load-bearing: a probe carrying no SNI gets a name-based
 virtual host's **default** certificate, so on a machine hosting twenty sites the
 other nineteen are invisible — and they are exactly the ones nobody is watching.
 
-**Turning it off:** `--without listener`, at enrolment (recorded in the config)
+**Turning it off:** `--without listener`, at enrollment (recorded in the config)
 or on a single `scan`/`run`. Probing local services is a thing a security team
 may reasonably forbid. A disabled source is never declared complete, so turning
 one off makes its past findings go stale rather than making them disappear.
