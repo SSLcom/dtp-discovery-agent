@@ -291,6 +291,14 @@ a local rebuild of v0.1.0 matched the published archives byte for byte.
 Rebuilding the tag yourself is the verification path that depends on trusting
 nobody.
 
+**Rebuild from a checkout that HAS the tag**, which `git checkout v1.2.3` above
+gives you but `git clone --depth 1` of a branch does not. Go stamps the main
+module's own version into the binary, and it derives that from the nearest
+reachable git tag: with the tag present you get `v1.2.3`, without it
+`v0.0.0-<date>-<commit>`, and the binaries differ by exactly that string. Same
+source, same compiler, different bytes — which looks like tampering and is not.
+It is the one way to get a mismatch while doing everything else right.
+
 Releases **after v0.1.0** also carry a GitHub build-provenance attestation — a
 signed statement of which workflow, from which commit, produced those exact
 bytes:

@@ -14,6 +14,14 @@
 # archives are built with sorted entries, a fixed mtime and no owner metadata.
 # So anyone can rebuild a published tag and check the checksums match, which is
 # the only claim about provenance that does not rest on trusting us.
+#
+# WITH ONE CONDITION, WHICH IS NOT OBVIOUS: build from a checkout that has the
+# TAG. Go stamps the main module's own version into the binary and derives it
+# from the nearest reachable git tag — `v1.2.3` when the tag is there,
+# `v0.0.0-<date>-<commit>` when it is not — so a tagless clone produces a
+# different binary from identical source. Measured: a dry run on a runner
+# (tagless checkout) and the same commit built here (tags present) differed in
+# that one string and nothing else.
 set -euo pipefail
 
 VERSION="${1:-}"
