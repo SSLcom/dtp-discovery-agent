@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,5 +216,94 @@ func TestNoKeyMaterialLeavesAKeystore(t *testing.T) {
 		if strings.Contains(strings.ToUpper(o.CertificatePEM+o.ChainPEM), "PRIVATE KEY") {
 			t.Fatal("key material reached an observation")
 		}
+	}
+}
+
+// keystoreWithKeyAndNoChain builds a JKS holding one PrivateKeyEntry whose
+// certificate chain is EMPTY. keytool does not normally write one, but the
+// format permits chainLen 0 — and a key entry whose certificates all fail to
+// parse arrives at the collector identically, because one unreadable
+// certificate must not invalidate the aliases around it.
+func keystoreWithKeyAndNoChain(t *testing.T, alias string) []byte {
+	t.Helper()
+	var b []byte
+	u32 := func(v uint32) {
+		var x [4]byte
+		binary.BigEndian.PutUint32(x[:], v)
+		b = append(b, x[:]...)
+	}
+	utf := func(s string) {
+		var x [2]byte
+		binary.BigEndian.PutUint16(x[:], uint16(len(s)))
+		b = append(b, x[:]...)
+		b = append(b, s...)
+	}
+
+	u32(0xFEEDFEED) // magic
+	u32(2)          // version
+	u32(1)          // one entry
+	u32(1)          // tag: private key
+	utf(alias)
+	b = append(b, make([]byte, 8)...) // creation date
+	u32(4)                            // key length
+	b = append(b, 0xDE, 0xAD, 0xBE, 0xEF)
+	u32(0)                             // CHAIN LENGTH ZERO
+	b = append(b, make([]byte, 20)...) // trailing digest
+	return b
+}
+
+// Found by Bugbot on the branch, and it PANICKED: the private-key exception
+// added here indexed Certificates[0] after parse.Leaf found nothing, and a key
+// entry can hold no certificate at all. Collect has no recover, so one odd
+// alias aborted the scan of the entire host — every other collector's findings
+// with it.
+func TestAKeyEntryWithNoCertificateIsSkippedRatherThanFatal(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "keyonly.jks"),
+		keystoreWithKeyAndNoChain(t, "keyonly"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var res Result
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a keystore entry with no certificate panicked the scan: %v", r)
+			}
+		}()
+		res = collectKeystores(t, root)
+	}()
+
+	// There is nothing to inventory in a key with no certificate, so silence is
+	// the right answer — not an error a member can do nothing about.
+	if len(res.Observations) != 0 {
+		t.Errorf("reported %d observations for an entry holding no certificate", len(res.Observations))
+	}
+	if !res.Completed {
+		t.Errorf("an entry with no certificate did not stop this sweep seeing everything: %v", res.Errors)
+	}
+}
+
+// The neighbours still have to be read. The whole reason a key entry can arrive
+// with no certificate is that the parser skips one it cannot decode rather than
+// abandoning the file, and that is only worth doing if what follows survives.
+func TestAnAliasWithNoCertificateDoesNotHideTheOnesAroundIt(t *testing.T) {
+	root := t.TempDir()
+	good := keystoreFixture(t, "real.jks", root)
+	if err := os.WriteFile(filepath.Join(root, "keyonly.jks"),
+		keystoreWithKeyAndNoChain(t, "keyonly"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectKeystores(t, root)
+
+	found := 0
+	for _, o := range res.Observations {
+		if o.Binding["keystore"] == good {
+			found++
+		}
+	}
+	if found != 3 {
+		t.Fatalf("got %d observations from the good keystore, want its 3 aliases: %v", found, locations(res))
 	}
 }
