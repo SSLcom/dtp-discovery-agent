@@ -198,9 +198,22 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result) {
 	// goes through the directories those live in. Reporting one would send a CA
 	// root nobody chose, with a hundred others as its chain, from every host in
 	// an estate, and bury the certificates a member is paying to track.
+	//
+	// UNLESS THERE IS A KEY, and that exception is not a detail. `openssl req
+	// -x509` — which is how essentially every self-signed certificate on every
+	// internal service got made — sets basicConstraints CA:TRUE by default in
+	// OpenSSL 3, so the certificate on a host's own management interface looks
+	// exactly like a trust anchor. The key beside it is what tells them apart:
+	// a trust store is a list of issuers and has no key, while a certificate
+	// this machine holds the key for is one it can serve. Measured on a real
+	// scan, where a self-signed site certificate and its key sat in the same
+	// directory and the collector reported neither.
 	leaf, chain, found := parse.Leaf(parsed.Certificates)
 	if !found {
-		return
+		if keyPath == "" {
+			return
+		}
+		leaf, chain = parsed.Certificates[0], parsed.Certificates[1:]
 	}
 	res.Observations = append(res.Observations, Observation{
 		CertificatePEM:     parse.EncodePEM([]*x509.Certificate{leaf}),
