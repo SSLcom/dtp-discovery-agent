@@ -40,7 +40,7 @@ esac
 # should not silently have to get every host admitted again.
 #
 # dpkg reclaims the package-owned directory on removal ONLY when it is empty,
-# which is to say only when there was no enrolment to lose; a host that ever
+# which is to say only when there was no enrollment to lose; a host that ever
 # ran keeps its key through both `remove` and `purge`. Verified, not assumed —
 # see script/test-package-lifecycle.sh. Discarding the identity is a deliberate
 # act: `rm -rf /var/lib/dtp-agent`, after revoking the agent in DTP.

@@ -4,7 +4,7 @@
 # more than the tarball: it puts the systemd units in place, survives an
 # upgrade, and can be removed cleanly by whatever already manages the host.
 #
-# ENROLMENT IS NOT PART OF INSTALLATION. The package installs the binary and a
+# ENROLLMENT IS NOT PART OF INSTALLATION. The package installs the binary and a
 # STOPPED timer; a member enrols and then starts it. Installing something that
 # immediately begins reporting to a service the operator has not yet configured
 # would be the wrong default even if it worked — and it cannot work, because it
