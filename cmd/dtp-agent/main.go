@@ -104,7 +104,7 @@ func rootsFlag(fs *flag.FlagSet) *roots {
 }
 
 // without is a repeatable --without, naming a source this host will not
-// collect. Recorded at enrolment so the service unit needs no arguments, and
+// collect. Recorded at enrollment so the service unit needs no arguments, and
 // accepted on scan/run so the effect can be seen before it is committed to.
 func withoutFlag(fs *flag.FlagSet) *roots {
 	r := &roots{}
@@ -226,7 +226,7 @@ func cmdScan(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Scanning does not require enrolment — seeing what the agent WOULD report
+	// Scanning does not require enrollment — seeing what the agent WOULD report
 	// before letting it report anything is the point of this command.
 	var cfg *state.Config
 	if store, err := state.Open(*dir); err == nil {

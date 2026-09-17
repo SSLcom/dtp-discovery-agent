@@ -190,7 +190,7 @@ func TestTheAgentCanStillReadItsOwnKey(t *testing.T) {
 
 // SYSTEM has to be on the list whoever ran the agent. An administrator enrols
 // by hand, and the service that starts afterwards runs as SYSTEM and has to be
-// able to read the key that enrolment created.
+// able to read the key that enrollment created.
 func TestSystemCanReadTheKeyWhoeverCreatedIt(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
