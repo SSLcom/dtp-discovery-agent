@@ -255,11 +255,17 @@ nothing is installed. It is on GitHub so you can read it before running it —
 and if piping a script into a shell is not for you, the manual path is below and
 is what the script does anyway.
 
+**Everything published is on the
+[releases page](https://github.com/SSLcom/dtp-discovery-agent/releases):**
+archives for six platforms, `.deb` and `.rpm` packages, `SHA256SUMS`, and — for
+every release after v0.1.0 — a build-provenance attestation. It is also where
+`VERSION` below comes from, since the asset names carry it.
+
 On Debian/Ubuntu or RHEL/Fedora, prefer the package: it places the systemd units
 and survives upgrades.
 
 ```sh
-# Verify, then install.
+# Verify, then install. VERSION is on the releases page, linked above.
 curl -fsSLO https://github.com/SSLcom/dtp-discovery-agent/releases/latest/download/SHA256SUMS
 curl -fsSLO https://github.com/SSLcom/dtp-discovery-agent/releases/latest/download/dtp-agent_VERSION_amd64.deb
 sha256sum -c --ignore-missing SHA256SUMS
