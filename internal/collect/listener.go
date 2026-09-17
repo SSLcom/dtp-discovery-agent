@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -192,14 +193,33 @@ func (c *Listener) probeTarget(ctx context.Context, b ListenerBounds, target soc
 	// the address receives, and on a single-site host it is the whole answer.
 	names := append([]string{""}, b.ServerNames...)
 	unanswered := 0
+	// Certificates already recorded for THIS socket. A name that draws the
+	// certificate an earlier probe already found is the same placement seen
+	// twice, not a second one.
+	recorded := map[[32]byte]bool{}
 
 	for i, serverName := range names {
 		obs, verdict, err := c.probeOne(ctx, b, target, serverName)
 
 		switch verdict {
 		case probeFound:
-			out.observations = append(out.observations, *obs)
 			unanswered = 0
+			// ONE SOCKET SERVING ONE CERTIFICATE IS ONE FINDING, however many
+			// names it answers to. A socket that is not name-based returns the
+			// same certificate to every probe, so without this a host with
+			// twenty virtual hosts behind one address reports the same
+			// certificate twenty-one times — and `dtp-agent scan`, which is the
+			// first thing anybody looks at, becomes a screen of identical lines.
+			//
+			// The probe carrying NO SNI is the one kept, because it is what any
+			// client reaching that address receives. The names are still worth
+			// sending: the whole point is the socket that answers them
+			// DIFFERENTLY, and those certificates are recorded as they are
+			// found.
+			if fingerprint := sha256.Sum256([]byte(obs.CertificatePEM)); !recorded[fingerprint] {
+				recorded[fingerprint] = true
+				out.observations = append(out.observations, *obs)
+			}
 
 		case probeNone:
 			// ONLY THE FIRST PROBE CAN CONCLUDE ANYTHING ABOUT THE PORT. It
