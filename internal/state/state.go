@@ -166,27 +166,17 @@ func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// secure narrows a path's permissions to exactly `want`, and says which path it
-// was if it cannot. Only ever tightens — the modes it is called with are the
-// tightest the agent uses.
+// secure restricts a path to the identities that have business reading this
+// agent's private key.
 //
-// ON WINDOWS THIS IS ALL BUT A NO-OP, and that is not a gap being hidden:
-// os.Chmod there controls only the read-only attribute, and access is decided
-// by the ACL. The call is harmless and the guarantee simply is not a POSIX mode
-// on that platform — which is also why fileOwner reports nothing there.
-func secure(path string, want os.FileMode) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-	if info.Mode().Perm() == want {
-		return nil
-	}
-	if err := os.Chmod(path, want); err != nil {
-		return fmt.Errorf("securing %s: %w", path, err)
-	}
-	return nil
-}
+// HOW is per-platform, and the difference is not cosmetic. On Unix it is a
+// chmod to `want`. On Windows there are no mode bits at all, so `want` is the
+// INTENT — 0600 means "this process and nobody else" — and the enforcement is
+// an ACL that expresses the same thing. See secure_unix.go and
+// secure_windows.go.
+//
+// Only ever tightens: the modes it is called with are the tightest the agent
+// uses.
 
 func parseKey(raw []byte) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(raw)
