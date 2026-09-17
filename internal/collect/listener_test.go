@@ -508,8 +508,21 @@ func serveBySNI(t *testing.T, cfg *tls.Config, decide func(hello []byte) string)
 // says nothing about the names after it in the list, and abandoning them while
 // the sweep still counted as complete is what marks a live certificate gone.
 func TestANameThatDrawsNothingDoesNotAbandonTheNamesAfterIt(t *testing.T) {
-	cert := selfSigned(t, "beta.example.com")
-	port := serveBySNI(t, &tls.Config{Certificates: []tls.Certificate{cert}},
+	// beta serves a certificate of its OWN, so its finding is distinguishable
+	// from the one the nameless probe gets. Were they the same certificate this
+	// would be one placement seen twice, and correctly reported once — which is
+	// a different rule, tested separately.
+	fallback := selfSigned(t, "default.example.com")
+	beta := selfSigned(t, "beta.example.com")
+	port := serveBySNI(t, &tls.Config{
+		Certificates: []tls.Certificate{fallback},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if hello.ServerName == "beta.example.com" {
+				return &beta, nil
+			}
+			return &fallback, nil
+		},
+	},
 		func(hello []byte) string {
 			if strings.Contains(string(hello), "elsewhere.example.com") {
 				return "silent"
@@ -523,7 +536,7 @@ func TestANameThatDrawsNothingDoesNotAbandonTheNamesAfterIt(t *testing.T) {
 	}, port)
 
 	names := commonNames(t, res)
-	if len(names) != 2 {
+	if strings.Join(names, ",") != "default.example.com,beta.example.com" {
 		t.Fatalf("expected the no-SNI probe and beta to answer, got %v (errors %v)", names, res.Errors)
 	}
 	for _, obs := range res.Observations {
@@ -583,5 +596,57 @@ func TestAPortThatNeverAnswersIsGivenUpOn(t *testing.T) {
 	}
 	if res.Completed {
 		t.Error("a port the agent could not read must still spoil the sweep")
+	}
+}
+
+// One socket serving one certificate is ONE finding, however many names it
+// answers to. A socket that is not name-based returns the same certificate to
+// every probe, so a host with twenty virtual hosts behind one address would
+// otherwise report it twenty-one times — and `dtp-agent scan` is the first
+// thing anybody looks at when they want to know whether this works.
+//
+// Measured on the shipped v0.2.0 binary against an `openssl s_server`: three
+// identical lines for one listener.
+func TestOneSocketServingOneCertificateIsOneFinding(t *testing.T) {
+	// Answers every probe with the same certificate, whatever SNI it carries.
+	port := serveTLS(t, &tls.Config{Certificates: []tls.Certificate{selfSigned(t, "single.example.com")}})
+
+	res := collectSwept(t, ListenerBounds{
+		Timeout:     2 * time.Second,
+		ServerNames: []string{"one.example.com", "two.example.com", "three.example.com"},
+	}, port)
+
+	if len(res.Observations) != 1 {
+		t.Fatalf("got %d observations for one certificate on one socket: %v",
+			len(res.Observations), commonNames(t, res))
+	}
+	// The probe carrying NO SNI is the one kept: it is what any client reaching
+	// that address receives, and naming one of several virtual hosts in the
+	// binding would be picking one arbitrarily.
+	if got := res.Observations[0].Binding["server_name"]; got != "" {
+		t.Errorf("binding claims server_name %q; the nameless probe is the canonical one", got)
+	}
+	if !res.Completed {
+		t.Errorf("nothing here should spoil the sweep: %v", res.Errors)
+	}
+}
+
+// The mirror of the rule above, and the reason it is scoped to a socket rather
+// than to the run: the SAME certificate on TWO ports is two placements. A
+// member replacing it has two things to reload, and collapsing them would hide
+// one of them.
+func TestTheSameCertificateOnTwoSocketsIsTwoFindings(t *testing.T) {
+	shared := selfSigned(t, "shared.example.com")
+	first := serveTLS(t, &tls.Config{Certificates: []tls.Certificate{shared}})
+	second := serveTLS(t, &tls.Config{Certificates: []tls.Certificate{shared}})
+
+	res := collectSwept(t, ListenerBounds{Timeout: 2 * time.Second}, first, second)
+
+	if len(res.Observations) != 2 {
+		t.Fatalf("got %d observations for one certificate on two sockets: %v",
+			len(res.Observations), locations(res))
+	}
+	if res.Observations[0].Location == res.Observations[1].Location {
+		t.Errorf("both were recorded at %q; they are different places", res.Observations[0].Location)
 	}
 }

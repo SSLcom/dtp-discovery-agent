@@ -385,3 +385,49 @@ func issuedByACA(t *testing.T, isCA bool) *x509.Certificate {
 	}
 	return leaf
 }
+
+// `openssl req -x509` sets basicConstraints CA:TRUE by default in OpenSSL 3,
+// and that is how essentially every self-signed certificate on every internal
+// service got made. So the certificate on a host's own management interface
+// looks exactly like a trust anchor — and the trust-bundle rule, correct in
+// itself, made it invisible.
+//
+// The key beside it is what tells them apart. A trust store is a list of
+// issuers and has no key; a certificate this machine holds the key for is one
+// it can serve. Found by running the shipped binary against a directory
+// containing a self-signed certificate and its key, and getting nothing.
+func TestASelfSignedCertificateWithItsKeyIsADeployment(t *testing.T) {
+	dir := t.TempDir()
+	// CA:TRUE, exactly as the ordinary openssl invocation produces.
+	writeCAStyleLeaf(t, filepath.Join(dir, "site.pem"), "selfsigned.example.com")
+	writeKey(t, filepath.Join(dir, "site.key"))
+
+	res := collectIn(t, dir)
+	if len(res.Observations) != 1 {
+		t.Fatalf("a self-signed certificate with its key beside it is deployed here: got %d observations", len(res.Observations))
+	}
+	if !res.Observations[0].PrivateKeyPresent {
+		t.Error("the key that makes it a deployment was not recorded")
+	}
+
+	// And the rule it must not undo: the same certificate with NO key is still
+	// a trust anchor, and a bundle of them is still a trust store.
+	bare := t.TempDir()
+	writeCAStyleLeaf(t, filepath.Join(bare, "root.pem"), "Some Root CA")
+	if res := collectIn(t, bare); len(res.Observations) != 0 {
+		t.Errorf("a CA certificate with no key is an issuer, not a deployment: got %d", len(res.Observations))
+	}
+}
+
+// writeCAStyleLeaf writes a self-signed certificate marked CA:TRUE — what
+// `openssl req -x509` produces without extra arguments.
+func writeCAStyleLeaf(t *testing.T, path, cn string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	der := makeCert(t, cn, true)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
