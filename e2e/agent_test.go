@@ -53,7 +53,7 @@ func (a *agent) run(args ...string) (string, error) {
 	return string(out), err
 }
 
-// TestTheWholeThing walks one agent through enrolment, the pending wait,
+// TestTheWholeThing walks one agent through enrollment, the pending wait,
 // approval, reporting and revocation, asserting at each step on what the server
 // actually received.
 func TestTheWholeThing(t *testing.T) {
@@ -192,13 +192,27 @@ func assertNoKeyMaterialOnTheWire(t *testing.T, server *fakeDTP) {
 // three aliases, and a run that claimed 12 placements where there were 9.
 func assertEachPlacementOnce(t *testing.T, obs []observation) {
 	t.Helper()
+	// Keyed on the CERTIFICATE as well as the location, because that is how the
+	// platform keys it: the unique index is
+	// (agent, source, location, managed_certificate).
+	//
+	// Location alone is wrong, and a Windows runner proved it — the os_store
+	// collector reports the STORE as the location on purpose, so the five
+	// certificates in LocalMachine\My are five placements sharing one location,
+	// not one placement reported five times. The first version of this
+	// assertion called that a duplicate and went red on the one platform with a
+	// real certificate store.
 	seen := map[string]int{}
 	for _, o := range obs {
-		seen[o.Source+"|"+filepath.ToSlash(o.Location)]++
+		seen[o.Source+"|"+filepath.ToSlash(o.Location)+"|"+o.CertificatePEM]++
 	}
 	for key, n := range seen {
 		if n > 1 {
-			t.Errorf("reported %d times, and a member reads that number: %s", n, key)
+			// The PEM makes the key unreadable; the source and location are
+			// what identify the placement to a person.
+			source, rest, _ := strings.Cut(key, "|")
+			location, _, _ := strings.Cut(rest, "|")
+			t.Errorf("reported %d times, and a member reads that number: %s %s", n, source, location)
 		}
 	}
 }
