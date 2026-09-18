@@ -307,3 +307,38 @@ func TestAnAliasWithNoCertificateDoesNotHideTheOnesAroundIt(t *testing.T) {
 		t.Fatalf("got %d observations from the good keystore, want its 3 aliases: %v", found, locations(res))
 	}
 }
+
+// Found by running the agent end to end against a live DTP, not by any test
+// here: a Tomcat keystore under /opt/tomcat/conf was reported TWICE — six
+// observations for three aliases — because two DEFAULT roots glob to the same
+// directory. Every collector test until now used a single root, so nothing
+// could see it.
+//
+// The server's upsert collapsed the duplicates, so no stored data was wrong.
+// What was wrong is what a person reads: `dtp-agent scan` printed every alias
+// twice, and the run recorded 12 observations for 9 real placements.
+func TestAKeystoreReachedThroughTwoRootsIsReportedOnce(t *testing.T) {
+	root := t.TempDir()
+	keystoreFixture(t, "real.jks", filepath.Join(root, "conf"))
+
+	// Exactly the shape of the shipped defaults: one glob and one literal that
+	// resolve to the same directory.
+	c := &Keystores{Bounds: KeystoreBounds{Roots: []string{
+		filepath.Join(root, "*", ""),
+		filepath.Join(root, "conf"),
+		root,
+	}}}
+	res := c.Collect(context.Background())
+
+	if len(res.Observations) != 3 {
+		t.Fatalf("got %d observations for a 3-alias keystore reached through 3 overlapping roots: %v",
+			len(res.Observations), locations(res))
+	}
+	seen := map[string]bool{}
+	for _, o := range res.Observations {
+		if seen[o.Location] {
+			t.Errorf("location reported twice: %s", o.Location)
+		}
+		seen[o.Location] = true
+	}
+}

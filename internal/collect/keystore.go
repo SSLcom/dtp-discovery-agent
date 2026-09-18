@@ -111,6 +111,12 @@ func (c *Keystores) Collect(ctx context.Context) Result {
 	b := c.Bounds.withDefaults()
 	res := Result{Source: SourceJavaKeystore, Completed: true}
 	seen := 0
+	// Paths already examined, so a file reached through two roots is reported
+	// ONCE. The default roots deliberately overlap — `/opt/tomcat*/conf` and
+	// `/opt/*/conf` both match /opt/tomcat/conf — because covering the layouts
+	// people actually use means accepting overlap. What must not follow is
+	// scanning the same keystore twice.
+	examined := map[string]bool{}
 
 	// JAVA_HOME is where a hand-installed JDK lives, and a hand-installed JDK
 	// is exactly the one that is not in any of the standard directories.
@@ -133,7 +139,7 @@ func (c *Keystores) Collect(ctx context.Context) Result {
 			matches = []string{root}
 		}
 		for _, dir := range matches {
-			if err := c.walk(ctx, dir, b, &res, &seen); err != nil {
+			if err := c.walk(ctx, dir, b, &res, &seen, examined); err != nil {
 				res.Completed = false
 				res.Errors = append(res.Errors, Error{
 					Collector: SourceJavaKeystore, Location: dir, Error: err.Error(),
@@ -144,7 +150,7 @@ func (c *Keystores) Collect(ctx context.Context) Result {
 	return res
 }
 
-func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res *Result, seen *int) error {
+func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res *Result, seen *int, examined map[string]bool) error {
 	rootDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
 
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -183,12 +189,27 @@ func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res
 		if err != nil || info.Size() == 0 || info.Size() > b.MaxFileBytes {
 			return nil
 		}
-		c.examine(path, info, res)
+		c.examine(path, info, res, examined)
 		return nil
 	})
 }
 
-func (c *Keystores) examine(path string, info fs.FileInfo, res *Result) {
+func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+	// Measured end to end against a live DTP: a Tomcat keystore under
+	// /opt/tomcat/conf was reported TWICE, six observations for three aliases,
+	// because two default roots glob to the same directory. The server's upsert
+	// collapsed them so no data was wrong — but `dtp-agent scan` printed every
+	// alias twice, and the run recorded 12 observations for 9 placements, which
+	// is the number a member reads.
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		resolved = path
+	}
+	if examined[resolved] {
+		return
+	}
+	examined[resolved] = true
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		res.Completed = false

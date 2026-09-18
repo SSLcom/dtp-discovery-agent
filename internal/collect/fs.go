@@ -81,6 +81,11 @@ func (c *FS) Collect(ctx context.Context) Result {
 	b := c.Bounds.withDefaults()
 	res := Result{Source: SourceFile, Completed: true}
 	seen := 0
+	// Same rule as the keystore collector, for the same reason. These defaults
+	// do not currently overlap, but a member adding `--root` has no way to know
+	// that /etc/ssl is already covered, and nesting one root inside another is
+	// the obvious mistake to make.
+	examined := map[string]bool{}
 
 	for _, root := range b.Roots {
 		// A root may be a glob (/opt/*/ssl). Expanding here rather than walking
@@ -95,7 +100,7 @@ func (c *FS) Collect(ctx context.Context) Result {
 		}
 
 		for _, dir := range matches {
-			if err := c.walk(ctx, dir, b, &res, &seen); err != nil {
+			if err := c.walk(ctx, dir, b, &res, &seen, examined); err != nil {
 				// The walk itself failed — not one file within it. The sweep is
 				// incomplete, so nothing this collector reports may be used to
 				// mark a certificate absent.
@@ -109,7 +114,7 @@ func (c *FS) Collect(ctx context.Context) Result {
 	return res
 }
 
-func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen *int) error {
+func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen *int, examined map[string]bool) error {
 	rootDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
 
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -156,12 +161,21 @@ func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen 
 		if err != nil || info.Size() > b.MaxFileBytes || info.Size() == 0 {
 			return nil
 		}
-		c.examine(path, info, res)
+		c.examine(path, info, res, examined)
 		return nil
 	})
 }
 
-func (c *FS) examine(path string, info fs.FileInfo, res *Result) {
+func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		resolved = path
+	}
+	if examined[resolved] {
+		return
+	}
+	examined[resolved] = true
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		res.Completed = false
