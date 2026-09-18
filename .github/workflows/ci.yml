@@ -44,6 +44,20 @@ jobs:
           [ -z "$unformatted" ] || { echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1; }
 
       - run: go vet ./...
+
+      # ./... INCLUDES ./e2e, which builds the binary and runs it end to end
+      # against a protocol-faithful server on a host seeded with the awkward mix
+      # — an expired certificate, a PKCS#12, a keytool keystore, a self-signed
+      # CA:TRUE certificate, a directory of nothing but private keys.
+      #
+      # It is here because two releases in two days fixed bugs this suite could
+      # not see: every collector test exercised ONE collector against ONE root,
+      # and both bugs lived between "each collector works" and "they work
+      # together on a real machine". Both were found by hand, after shipping.
+      # Reinstating either now turns ./e2e red.
+      #
+      # It needs no Docker and no DTP: this repository cannot boot one, and the
+      # server half is a test fixture that speaks the documented protocol.
       - run: go test -race ./...
 
   # The release path, exercised on every change rather than only when a tag is
