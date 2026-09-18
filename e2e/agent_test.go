@@ -63,18 +63,19 @@ func TestTheWholeThing(t *testing.T) {
 	hostRoot := seedHost(t)
 	a := &agent{bin: buildAgent(t), state: t.TempDir(), host: hostRoot, t: t}
 
-	// ── enrol ────────────────────────────────────────────────────────────────
+	// ── enroll ───────────────────────────────────────────────────────────────
 	out, err := a.run("enroll", "--server", server.url(), "--account", "acct-e2e", "--token", "dtpd_e2e")
 	if err != nil {
-		t.Fatalf("enrol failed: %v\n%s", err, out)
+		t.Fatalf("enroll failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "pending") {
 		t.Errorf("an agent must land pending, not admitted: %s", out)
 	}
-	if len(server.registered) != 1 {
-		t.Fatalf("server saw %d registrations", len(server.registered))
+	registrations := server.registrations()
+	if len(registrations) != 1 {
+		t.Fatalf("server saw %d registrations", len(registrations))
 	}
-	if pk, _ := server.registered[0]["public_key_pem"].(string); !strings.Contains(pk, "PUBLIC KEY") {
+	if pk, _ := registrations[0]["public_key_pem"].(string); !strings.Contains(pk, "PUBLIC KEY") {
 		t.Error("registration carried no public key")
 	}
 	patchConfig(t, a.state, hostRoot)
@@ -92,7 +93,7 @@ func TestTheWholeThing(t *testing.T) {
 	if !strings.Contains(strings.ToLower(out), "approve") {
 		t.Errorf("a pending agent must say what it is waiting for, whatever it exits: %s", out)
 	}
-	if server.tokenPending == 0 {
+	if server.pendingAnswers() == 0 {
 		t.Error("the server never answered 202, so the pending path was not exercised")
 	}
 	if n := len(server.observations()); n != 0 {

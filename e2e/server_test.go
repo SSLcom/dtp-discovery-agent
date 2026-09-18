@@ -160,6 +160,23 @@ func (f *fakeDTP) inventory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// registrations and pendingAnswers are read from the TEST goroutine while the
+// server's handlers write them from their own. Without taking the lock there is
+// no happens-before edge between the two, so `go test -race` is entitled to
+// flag it — intermittently, which would make the matrix job this harness exists
+// to run flaky, and a flaky end-to-end test is worse than none.
+func (f *fakeDTP) registrations() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.registered...)
+}
+
+func (f *fakeDTP) pendingAnswers() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokenPending
+}
+
 // observations flattens every page of every run reported so far.
 func (f *fakeDTP) observations() []observation {
 	f.mu.Lock()
