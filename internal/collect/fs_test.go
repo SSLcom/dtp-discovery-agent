@@ -431,3 +431,22 @@ func writeCAStyleLeaf(t *testing.T, path, cn string) {
 		t.Fatal(err)
 	}
 }
+
+// The same rule for files. These defaults do not overlap today, but a member
+// adding `--root` has no way to know /etc/ssl is already covered, and nesting
+// one root inside another is the obvious mistake to make.
+func TestAFileReachedThroughTwoRootsIsReportedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeLeaf(t, filepath.Join(dir, "nested", "site.pem"), "www.example.com")
+
+	c := &FS{Bounds: Bounds{Roots: []string{dir, filepath.Join(dir, "nested")}}}
+	res := c.Collect(context.Background())
+
+	if len(res.Observations) != 1 {
+		var got []string
+		for _, o := range res.Observations {
+			got = append(got, o.Location)
+		}
+		t.Fatalf("one certificate under two overlapping roots gave %d observations: %v", len(res.Observations), got)
+	}
+}
