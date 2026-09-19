@@ -14,6 +14,24 @@ import (
 // for.
 const DefaultLogBytes = 1 << 20
 
+// DefaultRepeatWindow is how long one message is allowed to stand for itself
+// before it is written again.
+//
+// WITHOUT THIS THE LOG EATS ITSELF IN THE COMMONEST CASE THERE IS. A host that
+// has been installed but not yet enrolled says so every minute; a host waiting
+// for an admin to approve it says so every thirty seconds. Neither is an
+// error, both are the normal state during a rollout, and either fills a
+// megabyte in a few days — rotating away the startup lines that say which agent
+// this is, which is exactly what somebody arriving at the log went there to
+// read.
+//
+// Repeats are not silently dropped, because a log whose last line is half an
+// hour old cannot be told from a service that died half an hour ago. The
+// message is written again on the window, carrying the count of what it stood
+// in for: forty-eight lines a day instead of fourteen hundred, and the reader
+// can still see the agent is alive.
+const DefaultRepeatWindow = 30 * time.Minute
+
 // Log is the agent's record of what it did while nobody was watching.
 //
 // WHY A FILE AT ALL. A Windows service has no terminal: anything the agent
@@ -38,6 +56,18 @@ type Log struct {
 	max  int64
 	f    *os.File
 	n    int64
+
+	// RepeatWindow may be changed before the first write. Zero means
+	// DefaultRepeatWindow; negative disables collapsing entirely.
+	RepeatWindow time.Duration
+
+	last       string
+	lastAt     time.Time
+	suppressed int
+
+	// now is swapped out by tests. A repeat window that could only be
+	// exercised by waiting half an hour is one no test would ever check.
+	now func() time.Time
 }
 
 // OpenLog appends to path, rotating first if it is already at the cap.
@@ -45,7 +75,7 @@ func OpenLog(path string, max int64) (*Log, error) {
 	if max <= 0 {
 		max = DefaultLogBytes
 	}
-	l := &Log{path: path, max: max}
+	l := &Log{path: path, max: max, RepeatWindow: DefaultRepeatWindow, now: time.Now}
 	if err := l.open(); err != nil {
 		return nil, err
 	}
@@ -103,11 +133,30 @@ func (l *Log) Printf(format string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	msg := fmt.Sprintf(format, args...)
+	now := l.clock()
+
+	if l.RepeatWindow >= 0 && msg == l.last && now.Sub(l.lastAt) < l.window() {
+		l.suppressed++
+		return
+	}
+
+	suffix := ""
+	if l.suppressed > 0 {
+		// Said on the line it belongs to rather than on one of its own, so a
+		// reader scanning for the last thing that happened sees both at once.
+		suffix = fmt.Sprintf(" (and %d more like it)", l.suppressed)
+		l.suppressed = 0
+	}
+	l.last, l.lastAt = msg, now
+	l.writeLocked(now, msg+suffix)
+}
+
+func (l *Log) writeLocked(now time.Time, msg string) {
 	if l.f == nil {
 		return
 	}
-	line := fmt.Sprintf("%s %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
-	n, err := l.f.WriteString(line)
+	n, err := l.f.WriteString(fmt.Sprintf("%s %s\n", now.UTC().Format(time.RFC3339), msg))
 	l.n += int64(n)
 	if err != nil {
 		return
@@ -120,9 +169,31 @@ func (l *Log) Printf(format string, args ...any) {
 	}
 }
 
+func (l *Log) window() time.Duration {
+	if l.RepeatWindow == 0 {
+		return DefaultRepeatWindow
+	}
+	return l.RepeatWindow
+}
+
+func (l *Log) clock() time.Time {
+	if l.now == nil {
+		return time.Now()
+	}
+	return l.now()
+}
+
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Anything still standing behind a repeated line is written out here, so a
+	// service that stopped while waiting does not take the count of how long it
+	// waited with it.
+	if l.suppressed > 0 && l.f != nil {
+		n := l.suppressed
+		l.suppressed = 0
+		l.writeLocked(l.clock(), fmt.Sprintf("(the line above happened %d more times)", n))
+	}
 	if l.f == nil {
 		return nil
 	}

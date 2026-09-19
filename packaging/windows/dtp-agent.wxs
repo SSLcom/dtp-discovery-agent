@@ -111,7 +111,7 @@
                 service has somewhere to wait: with no configuration it logs
                 that it is not enrolled, checks again every minute, and starts
                 reporting within a minute of `dtp-agent enroll` — so a member
-                gets install, enrol, done, with no service commands at all.
+                gets install, enroll, done, with no service commands at all.
 
                 Installing is still not enrolling. A service that has never been
                 enrolled contacts nothing.
@@ -147,7 +147,7 @@
          Component node Environment"). Doing it by hand through the Registry
          table would mean REPLACING the machine's PATH with a value computed at
          build time, which is a way to break a server, so it is not done. The
-         member types the full path once, to enrol; after that the service runs
+         member types the full path once, to enroll; after that the service runs
          it and nobody types anything. The README gives that line in full.
 
       2. An installer UI. wixl emits no UI tables, so `msiexec /i` shows a

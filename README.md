@@ -257,9 +257,10 @@ is what the script does anyway.
 
 **Everything published is on the
 [releases page](https://github.com/SSLcom/dtp-discovery-agent/releases):**
-archives for six platforms, `.deb` and `.rpm` packages, `SHA256SUMS`, and — for
-every release after v0.1.0 — a build-provenance attestation. It is also where
-`VERSION` below comes from, since the asset names carry it.
+archives for six platforms, `.deb` and `.rpm` packages, an `.msi` for 64-bit
+Windows, `SHA256SUMS`, and — for every release after v0.1.0 — a build-provenance
+attestation. It is also where `VERSION` comes from, in every command on this
+page, since the asset names carry it.
 
 On Debian/Ubuntu or RHEL/Fedora, prefer the package: it places the systemd units
 and survives upgrades.
@@ -287,13 +288,16 @@ with the state directory as its only writable path.
 
 ### Windows
 
+Take `dtp-agent_VERSION_windows_amd64.msi` from the releases page linked above,
+which is also where `VERSION` comes from:
+
 ```
 msiexec /i dtp-agent_VERSION_windows_amd64.msi /qn
 ```
 
 The installer puts the binary in `C:\Program Files\SSL.com\DTP Agent`,
 registers the **DTP Certificate Discovery Agent** service (`DTPAgent`) to start
-automatically, and starts it. Then enrol, from an administrator prompt:
+automatically, and starts it. Then enroll it, from an administrator prompt:
 
 ```
 "C:\Program Files\SSL.com\DTP Agent\dtp-agent.exe" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
