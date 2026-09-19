@@ -18,7 +18,7 @@ fi
 
 cat <<'MSG'
 
-dtp-agent installed. It is not running yet — enrol it first:
+dtp-agent installed. It is not running yet — enroll it first:
 
   dtp-agent enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
   systemctl enable --now dtp-agent.timer

@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer for the DTP certificate discovery agent.
+
+  Built by script/build-msi.sh with wixl, from a pinned container, on whatever
+  machine is to hand — the same rule as every other artefact here: release logic
+  that can only run on a release runner is first tested at the moment it matters
+  most. wixl is not the WiX Toolset; it implements a subset, and two things this
+  file would otherwise do are simply not available. Both are noted below where
+  they would have gone, so the next person does not spend an afternoon finding
+  out for themselves.
+
+  WHAT THIS INSTALLS: the binary, and a Windows service registered to run it.
+  Windows is the platform where the agent finds the most — IIS, SQL Server, RDP
+  and WinRM all bind to a certificate STORE entry, so there is no file on disk
+  for any other collector to see — and it was the platform with the weakest
+  install story: a bare .exe and a scheduled task the member had to write.
+
+  WHAT IT DELIBERATELY DOES NOT DO: touch the agent's state directory, under
+  %ProgramData%. That directory holds the keypair DTP has already approved, so
+  deleting it on uninstall would silently turn every reinstall in an estate into
+  a fresh round of approvals. The installer never names it; creating and
+  securing it is the binary's job, because the binary is what knows the ACL it
+  needs. Discarding an agent's identity stays a deliberate act.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="$(var.ProductCode)"
+           Name="DTP Certificate Discovery Agent"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="SSL.com"
+           UpgradeCode="9B93179E-6A9F-491E-AEE8-244F720DC2E0">
+
+    <Package InstallerVersion="200"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Manufacturer="SSL.com"
+             Description="DTP certificate discovery agent $(var.Version)"/>
+
+    <Media Id="1" Cabinet="dtp-agent.cab" EmbedCab="yes"/>
+
+    <!--
+      Upgrading replaces the installed version rather than landing beside it,
+      and a downgrade is refused with a sentence rather than a repair loop.
+      The UpgradeCode above is what ties every version together and MUST NEVER
+      CHANGE: change it and the next release installs alongside its predecessor,
+      leaving two agents on one host reporting the same certificates twice.
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the DTP discovery agent is already installed on this machine."/>
+
+    <!--
+      Installing a service needs elevation. Without this the install fails
+      partway through with an installer error code; with it, the member is told
+      what is wrong while nothing has been changed yet.
+    -->
+    <Condition Message="This installer registers a Windows service and must be run as an administrator.">Privileged</Condition>
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/SSLcom/dtp-discovery-agent"/>
+    <Property Id="ARPHELPLINK" Value="https://github.com/SSLcom/dtp-discovery-agent/releases"/>
+    <!-- Nothing here is repairable or configurable from Add/Remove Programs:
+         the agent's configuration is written by `dtp-agent enroll`, not by the
+         installer, so offering those buttons would promise something false. -->
+    <Property Id="ARPNOMODIFY" Value="1"/>
+    <Property Id="ARPNOREPAIR" Value="1"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="VendorDir" Name="SSL.com">
+          <Directory Id="INSTALLDIR" Name="DTP Agent">
+
+            <Component Id="Agent" Guid="6173F589-5073-4422-A86F-CDCCDDDA6B17" Win64="yes">
+              <File Id="dtp_agent_exe"
+                    Name="dtp-agent.exe"
+                    Source="$(var.BinarySource)"
+                    KeyPath="yes"/>
+
+              <!--
+                RUNS AS LocalSystem, AND THAT IS NOT INCIDENTAL — the same
+                decision as User=root in the systemd unit, for the same reason.
+                The certificates worth finding sit in LocalMachine stores and in
+                IIS's configuration, and an unprivileged account reads neither.
+                An agent that silently saw half a host would be worse than one
+                that did not run, because the half it missed would look like a
+                machine with nothing on it.
+
+                Start="auto" so a host that reboots keeps reporting. A fleet that
+                quietly stops after patch Tuesday looks exactly like a fleet
+                whose certificates have not changed.
+
+                The single argument is how the binary knows it was started by
+                the service manager rather than by a person. It is stored in the
+                image path, where an administrator reading the registry can see
+                precisely what runs.
+              -->
+              <ServiceInstall Id="AgentService"
+                              Name="DTPAgent"
+                              DisplayName="DTP Certificate Discovery Agent"
+                              Description="Inventories the certificates installed on this host and reports them to the Digital Trust Platform. Read-only: it never reads a private key, installs nothing, and modifies no file."
+                              Type="ownProcess"
+                              Start="auto"
+                              ErrorControl="normal"
+                              Account="LocalSystem"
+                              Arguments="service"
+                              Vital="yes"/>
+
+              <!--
+                STARTED AT INSTALL, which is the opposite of what the .deb and
+                .rpm do, and the difference is deliberate. On Linux the package
+                leaves the timer stopped because a timer with no configuration
+                has nothing to do but fail every hour and fill the journal. This
+                service has somewhere to wait: with no configuration it logs
+                that it is not enrolled, checks again every minute, and starts
+                reporting within a minute of `dtp-agent enroll` — so a member
+                gets install, enroll, done, with no service commands at all.
+
+                Installing is still not enrolling. A service that has never been
+                enrolled contacts nothing.
+              -->
+              <ServiceControl Id="AgentServiceControl"
+                              Name="DTPAgent"
+                              Start="install"
+                              Stop="both"
+                              Remove="uninstall"
+                              Wait="yes"/>
+            </Component>
+
+            <Component Id="Docs" Guid="01EE209E-41ED-4308-A88B-23EB60849B4B" Win64="yes">
+              <File Id="license_txt" Name="LICENSE.txt" Source="$(var.LicenseSource)" KeyPath="yes"/>
+              <File Id="readme_md" Name="README.md" Source="$(var.ReadmeSource)"/>
+            </Component>
+
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Complete" Title="DTP Certificate Discovery Agent" Level="1">
+      <ComponentRef Id="Agent"/>
+      <ComponentRef Id="Docs"/>
+    </Feature>
+
+    <!--
+      TWO THINGS WIXL CANNOT DO, measured rather than assumed:
+
+      1. <Environment>, which is how the install directory would be appended to
+         the system PATH. wixl rejects the element outright ("unhandled child
+         Component node Environment"). Doing it by hand through the Registry
+         table would mean REPLACING the machine's PATH with a value computed at
+         build time, which is a way to break a server, so it is not done. The
+         member types the full path once, to enroll; after that the service runs
+         it and nobody types anything. The README gives that line in full.
+
+      2. An installer UI. wixl emits no UI tables, so `msiexec /i` shows a
+         progress dialog and no wizard. For an agent installed across an estate
+         by a configuration tool — `msiexec /i dtp-agent.msi /qn` — that is what
+         is wanted anyway.
+    -->
+  </Product>
+</Wix>

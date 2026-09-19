@@ -16,9 +16,9 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/SSLcom/dtp-discovery-agent/internal/collect"
+	"github.com/SSLcom/dtp-discovery-agent/internal/service"
 	"github.com/SSLcom/dtp-discovery-agent/internal/state"
 	"github.com/SSLcom/dtp-discovery-agent/internal/transport"
 )
@@ -45,6 +45,12 @@ const usage = `dtp-agent — certificate discovery for the Digital Trust Platfor
         it. The first question support will ask.
 
   dtp-agent version
+
+  dtp-agent service
+        Run under the Windows Service Control Manager, which starts this and
+        keeps the schedule the systemd timer keeps on Linux. Not something to
+        type: start it with "sc.exe start DTPAgent". Listed because an
+        administrator reading the service's image path will come looking for it.
 `
 
 func main() {
@@ -64,6 +70,8 @@ func main() {
 		err = cmdScan(ctx, os.Args[2:])
 	case "run":
 		err = cmdRun(ctx, os.Args[2:])
+	case "service":
+		err = cmdService(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
 	case "version":
@@ -283,99 +291,18 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	store, err := state.Open(*dir)
-	if err != nil {
-		return err
-	}
-	cfg, err := store.LoadConfig()
-	if err != nil {
-		return err
-	}
-	key, err := store.LoadOrCreateKey()
-	if err != nil {
-		return err
-	}
-	fingerprint, err := state.Fingerprint(key)
-	if err != nil {
-		return err
-	}
-
-	client := transport.New(cfg.ServerURL, Version)
-	signer := &transport.Signer{Key: key, Fingerprint: fingerprint}
-
-	if err := authenticate(ctx, client, signer, *once); err != nil {
-		return err
-	}
-
-	if checkin, err := client.Checkin(ctx); err == nil {
-		// Reported, not enforced. The agent cannot fix the host's clock, and
-		// refusing to run would turn a warning into an outage — but an operator
-		// reading these logs after "my fleet stopped authenticating" should find
-		// the answer here.
-		if skew, ok := checkin.ClockSkew(); ok && (skew > time.Minute || skew < -time.Minute) {
-			fmt.Fprintf(os.Stderr,
-				"warning: this host's clock is %s from the server's; assertions fail past two minutes\n",
-				skew.Round(time.Second))
-		}
-	}
-
-	started := time.Now()
-	results := runCollectors(ctx, cfg, *scanRoots, *skip)
-	runID := fmt.Sprintf("%s-%d", fingerprint[:12], started.UTC().Unix())
-
-	observed := 0
-	for _, r := range results {
-		observed += len(r.Observations)
-	}
-
-	resp, err := transport.Report(ctx, client, runID, started, results)
-	last := &state.LastRun{
-		RunID:      runID,
-		FinishedAt: time.Now().UTC().Format(time.RFC3339),
-		Observed:   observed,
-	}
-	if err != nil {
-		last.Error = err.Error()
-		_ = store.SaveLastRun(last)
-		return err
-	}
-	last.Recorded, last.Rejected = resp.Recorded, resp.Rejected
-	if err := store.SaveLastRun(last); err != nil {
-		return err
-	}
-
-	fmt.Printf("Reported %d observation(s): %d recorded, %d rejected (run %s).\n",
-		observed, resp.Recorded, resp.Rejected, resp.RunID)
-	for _, e := range resp.Errors {
-		fmt.Fprintf(os.Stderr, "  rejected: %s\n", e)
-	}
-	return nil
+	return reportOnce(ctx, *dir, *scanRoots, *skip, *once, consoleReporter())
 }
 
-// authenticate waits out a pending approval rather than failing.
-//
-// Running the installer before anyone has clicked approve is the NORMAL case in
-// an unattended rollout, not a mistake — so the default is to wait, and --once
-// is there for a cron job that should not hold a process open.
-func authenticate(ctx context.Context, client *transport.Client, signer *transport.Signer, once bool) error {
-	for {
-		err := client.Authenticate(ctx, signer)
+// ── service ──────────────────────────────────────────────────────────────────
 
-		var pending *transport.ErrPendingApproval
-		if errors.As(err, &pending) {
-			if once {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "waiting for approval; retrying in %s\n", pending.RetryAfter)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(pending.RetryAfter):
-				continue
-			}
-		}
+func cmdService(args []string) error {
+	fs := flag.NewFlagSet("service", flag.ExitOnError)
+	dir := stateFlag(fs)
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	return runService(*dir)
 }
 
 // ── status ───────────────────────────────────────────────────────────────────
@@ -393,6 +320,15 @@ func cmdStatus(args []string) error {
 	}
 
 	fmt.Printf("version   %s\nstate     %s\n", Version, store.Dir())
+	if st := serviceState(); st != "" {
+		fmt.Printf("service   %s\n", st)
+	}
+	// Only where something writes one. On Linux and macOS the journal and
+	// launchd's log already have it, and pointing at a file that does not
+	// exist is worse than pointing at nothing.
+	if _, err := os.Stat(service.LogPath(store.Dir())); err == nil {
+		fmt.Printf("log       %s\n", service.LogPath(store.Dir()))
+	}
 
 	cfg, err := store.LoadConfig()
 	if errors.Is(err, state.ErrNotEnrolled) {
