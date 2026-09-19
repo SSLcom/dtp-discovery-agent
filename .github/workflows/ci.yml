@@ -227,6 +227,12 @@ jobs:
         run: |
           $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
           & $exe enroll --server http://127.0.0.1:1 --account 00000000-0000-0000-0000-000000000000 2>&1 | Out-Null
+          # THAT ENROL IS SUPPOSED TO FAIL — there is nothing on port 1. What
+          # matters is that it wrote the keypair on its way there. Clearing
+          # $LASTEXITCODE is not cosmetic: the pwsh wrapper exits the whole step
+          # with whatever the last native command left behind, so an expected
+          # refusal fails a step whose every assertion passed.
+          $global:LASTEXITCODE = 0
           $key = "$env:ProgramData\DTP\agent\agent.key"
           if (-not (Test-Path $key)) { throw "enroll left no keypair to protect" }
 
