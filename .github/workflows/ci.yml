@@ -93,6 +93,19 @@ jobs:
       - name: Packages
         run: script/build-packages.sh 0.0.0-ci
 
+      # The Windows installer, built on Linux with wixl. It is here rather than
+      # only in the release workflow because it is the one artefact that cannot
+      # be exercised where it is built — only Windows can install an MSI — so
+      # everything that CAN be checked has to be checked at build time.
+      #
+      # build-msi.sh reads the package back and asserts the service is really
+      # in it. wixl reports success for a document whose elements it declined to
+      # act on, and an installer that lays down the binary and registers no
+      # service installs cleanly, appears in Add/Remove Programs, and never
+      # reports a certificate.
+      - name: Windows installer
+        run: script/build-msi.sh 0.0.0-ci
+
       # The installer's REFUSALS are the part worth testing. One that verifies
       # on the happy path and waves everything else through has the security
       # properties of one that does not verify at all.
@@ -113,6 +126,126 @@ jobs:
       # keypair survives removal and the state directory lands at 0700.
       - name: Package survives an upgrade and keeps the agent's identity
         run: script/test-package-lifecycle.sh 0.0.0-ci
+
+      # Handed to the Windows job below, which is the only place the installer
+      # can actually be installed.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-ci
+          path: dist/
+          retention-days: 1
+
+  # THE INSTALLER, INSTALLED. Everything else about the MSI is read off the
+  # package without running it, and reading a package is not the same as a
+  # machine acting on it: the tables can be perfect and the service can still
+  # fail to start, because a plain binary handed to the Service Control Manager
+  # is killed after thirty seconds with "did not respond in a timely fashion".
+  # That failure is invisible from Linux and invisible from a unit test, and it
+  # is the single most likely way this ships broken.
+  #
+  # So the package built on ubuntu is installed on a real Windows machine, put
+  # through start, stop and uninstall, and asked whether it kept the one thing
+  # that must survive an uninstall.
+  windows-install:
+    needs: release-path
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-ci
+          path: dist
+
+      - name: Install
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          Write-Host "installing $msi"
+          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content install.log -Tail 80
+            throw "msiexec exited $($p.ExitCode)"
+          }
+
+      # The service must be RUNNING, not merely registered. A binary that does
+      # not speak the service control protocol registers perfectly and then
+      # gets killed on start, which is the whole reason the agent has a
+      # `service` command rather than the installer pointing at `run`.
+      - name: The service is registered and running
+        shell: pwsh
+        run: |
+          $svc = Get-Service DTPAgent -ErrorAction Stop
+          Write-Host "status: $($svc.Status), start type: $($svc.StartType)"
+          if ($svc.Status -ne 'Running') { throw "the service is $($svc.Status), not Running" }
+          if ($svc.StartType -ne 'Automatic') { throw "start type is $($svc.StartType); a reboot would stop this host reporting" }
+
+      # An agent nobody has enrolled must WAIT, not fail. This is the state
+      # every host is in between running the installer and someone typing
+      # `enroll`, and a service that treated it as an error would crash-loop on
+      # every machine in an estate during a rollout.
+      - name: An unenrolled service waits, and says so where it can be read
+        shell: pwsh
+        run: |
+          $log = "$env:ProgramData\DTP\agent\agent.log"
+          for ($i = 0; $i -lt 30 -and -not (Test-Path $log); $i++) { Start-Sleep -Seconds 1 }
+          if (-not (Test-Path $log)) { throw "the service wrote no log at $log" }
+          $text = Get-Content $log -Raw
+          Write-Host $text
+          if ($text -notmatch 'not enrolled') { throw "the log does not say the agent is waiting to be enrolled" }
+          if ($text -match 'scan failed')     { throw "an unenrolled agent reported a failure" }
+
+      # `status` is what support asks for first, so it has to answer the
+      # Windows question — is the service running — and not only the question
+      # the Linux build could already answer.
+      - name: status reports the service
+        shell: pwsh
+        run: |
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          $out = & $exe status | Out-String
+          Write-Host $out
+          if ($out -notmatch 'service\s+running') { throw "status does not report the service as running" }
+          if ($out -notmatch 'enrolled\s+no')     { throw "status does not report that the agent is unenrolled" }
+
+      # Stopping must be prompt. The Service Control Manager kills a service
+      # that stops answering while it shuts down, and what the administrator
+      # sees is an error about the agent rather than a scan closing its
+      # connections.
+      - name: The service stops when it is told to
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          Stop-Service DTPAgent -ErrorAction Stop
+          (Get-Service DTPAgent).WaitForStatus('Stopped', '00:00:30')
+          Write-Host "stopped in $($sw.Elapsed.TotalSeconds)s"
+
+      # The property an uninstall must not break. The state directory holds the
+      # keypair DTP has already approved, so removing it would silently turn
+      # every reinstall in an estate into a fresh round of approvals. `enroll`
+      # against a dead address fails, and creates the key on its way there —
+      # which is exactly the state a half-configured host is in.
+      - name: Uninstalling keeps the agent's identity
+        shell: pwsh
+        run: |
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          & $exe enroll --server http://127.0.0.1:1 --account 00000000-0000-0000-0000-000000000000 2>&1 | Out-Null
+          # THAT ENROL IS SUPPOSED TO FAIL — there is nothing on port 1. What
+          # matters is that it wrote the keypair on its way there. Clearing
+          # $LASTEXITCODE is not cosmetic: the pwsh wrapper exits the whole step
+          # with whatever the last native command left behind, so an expected
+          # refusal fails a step whose every assertion passed.
+          $global:LASTEXITCODE = 0
+          $key = "$env:ProgramData\DTP\agent\agent.key"
+          if (-not (Test-Path $key)) { throw "enroll left no keypair to protect" }
+
+          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/l*v","uninstall.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content uninstall.log -Tail 80
+            throw "uninstall exited $($p.ExitCode)"
+          }
+
+          if (Get-Service DTPAgent -ErrorAction SilentlyContinue) { throw "the service outlived the uninstall" }
+          if (-not (Test-Path $key)) { throw "uninstalling deleted the agent's keypair" }
+          Write-Host "service gone, keypair kept"
 
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops

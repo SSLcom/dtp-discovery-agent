@@ -81,6 +81,17 @@ jobs:
       - name: Build packages
         run: script/build-packages.sh "${{ steps.version.outputs.version }}"
 
+      # AFTER the reproducibility check, deliberately, and this is where the
+      # .deb and .rpm sit too. An MSI carries a package-code UUID wixl mints
+      # per build and a timestamp from the clock, neither settable, so two
+      # builds of one commit differ — measured, not assumed. The claim the
+      # README makes is about the archives, and it stays exactly that.
+      #
+      # The script reads the finished package back and fails if the service is
+      # not in it.
+      - name: Build the Windows installer
+        run: script/build-msi.sh "${{ steps.version.outputs.version }}"
+
       # GitHub-native build provenance: a signed statement of which workflow,
       # from which commit, produced these exact bytes. Keyless, so there is no
       # signing key for us to lose or leak — the failure mode of every release

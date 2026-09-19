@@ -285,8 +285,57 @@ fleet installed from one image does not arrive at DTP all at once. The service
 unit runs the scan at idle IO and CPU priority under `ProtectSystem=strict`,
 with the state directory as its only writable path.
 
-**Every release is reproducible.** The archives are built with `-trimpath`,
-sorted entries and a fixed mtime, so you can rebuild a tag yourself and compare:
+### Windows
+
+```
+msiexec /i dtp-agent_VERSION_windows_amd64.msi /qn
+```
+
+The installer puts the binary in `C:\Program Files\SSL.com\DTP Agent`,
+registers the **DTP Certificate Discovery Agent** service (`DTPAgent`) to start
+automatically, and starts it. Then enrol, from an administrator prompt:
+
+```
+"C:\Program Files\SSL.com\DTP Agent\dtp-agent.exe" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
+```
+
+There is no third step. The service checks every minute until it has been
+enrolled, so it picks that up within a minute and reports from then on — hourly,
+with the same randomised delay the systemd timer uses, because a reporting
+rhythm belongs to the fleet rather than to the operating system.
+
+**Installing is still not enrolling.** The service is started here where the
+Linux packages leave the timer stopped, and the difference is deliberate: a
+systemd timer with no configuration has nothing to do but fail every hour and
+fill the journal, while this service has somewhere to wait. An agent that has
+never been enrolled contacts nothing.
+
+`dtp-agent status` is the first thing to run when something looks wrong. On
+Windows it reports whether the service is installed and running alongside what
+the agent last found, because those two facts otherwise live in two different
+places and the easier one to check is the one that does not say whether anything
+was reported. The service's own log is `%ProgramData%\DTP\agent\agent.log`,
+which is where the lines that go to the journal on Linux end up — a service
+started by the Service Control Manager has no terminal, so anything written to
+stdout or stderr is discarded.
+
+**Windows on ARM has no installer.** wixl, which is what lets the MSI be built
+on Linux alongside everything else, cannot emit an arm64 package. The arm64 zip
+is published, the binary is the same one, and registering the service by hand is
+two commands — unzip it somewhere permanent first, because the service records
+the path it was given:
+
+```
+sc.exe create DTPAgent binPath= "\"C:\dtp-agent\dtp-agent.exe\" service" start= auto DisplayName= "DTP Certificate Discovery Agent"
+sc.exe start DTPAgent
+```
+
+An x64 Windows machine can install the MSI instead; Windows on ARM will run the
+x64 binary under emulation, which works and is slower than it needs to be.
+
+**Every release archive is reproducible.** The archives are built with
+`-trimpath`, sorted entries and a fixed mtime, so you can rebuild a tag yourself
+and compare:
 
 ```sh
 git checkout v1.2.3 && script/build-release.sh 1.2.3 && cat dist/SHA256SUMS
@@ -296,6 +345,14 @@ CI enforces this by building twice and diffing, and it holds across machines —
 a local rebuild of v0.1.0 matched the published archives byte for byte.
 Rebuilding the tag yourself is the verification path that depends on trusting
 nobody.
+
+**The `.deb`, `.rpm` and `.msi` are outside that claim**, and the MSI cannot
+join it: an MSI carries a package-code UUID its builder mints afresh each time
+and a created/last-saved timestamp taken from the clock, neither of which is
+settable and neither of which honours `SOURCE_DATE_EPOCH`. Measured, not
+assumed. Every artefact is covered by `SHA256SUMS` and by the provenance
+attestation regardless; it is byte-for-byte *rebuilding* that stops at the
+archives.
 
 **Rebuild from a checkout that HAS the tag**, which `git checkout v1.2.3` above
 gives you but `git clone --depth 1` of a branch does not. Go stamps the main
@@ -330,6 +387,7 @@ pushed:
 ```sh
 script/build-release.sh 1.2.3    # archives + checksums for all six targets
 script/build-packages.sh 1.2.3   # .deb and .rpm, via a digest-pinned nfpm image
+script/build-msi.sh 1.2.3        # the Windows installer, via a digest-pinned wixl image
 script/test-install.sh 1.2.3     # install.sh accepts what it should, refuses what it should not
 ```
 
@@ -367,9 +425,8 @@ and a Firefox profile is not a certificate deployment. It is listed here rather
 than left unsaid: if an estate turns out to need it, the cost is known.
 
 Packaging shipped: tarballs and zips for six platforms, `.deb` and `.rpm`,
-systemd units and a launchd plist. Not yet: an `.msi` and a Windows Service
-wrapper (which needs the binary to speak the service control protocol), and a
-Homebrew tap.
+systemd units, a launchd plist, and — for Windows — an `.msi` that registers the
+agent as a service. Not yet: an arm64 Windows installer, and a Homebrew tap.
 
 ## License
 
