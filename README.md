@@ -297,11 +297,27 @@ msiexec /i dtp-agent_VERSION_windows_amd64.msi /qn
 
 The installer puts the binary in `C:\Program Files\SSL.com\DTP Agent`,
 registers the **DTP Certificate Discovery Agent** service (`DTPAgent`) to start
-automatically, and starts it. Then enroll it, from an administrator prompt:
+automatically, and starts it. Then enroll it, from an administrator **PowerShell**
+prompt:
+
+```
+& "C:\Program Files\SSL.com\DTP Agent\dtp-agent.exe" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
+```
+
+**The leading `&` is not decoration.** PowerShell parses a statement that starts
+with a quoted string as a string *expression*, so the obvious spelling — the
+path in quotes, arguments after it — does not run anything: it fails with
+`Unexpected token 'enroll' in expression or statement`. The call operator is
+what makes it a command. In Command Prompt the rule is the opposite, and the
+`&` has to come off:
 
 ```
 "C:\Program Files\SSL.com\DTP Agent\dtp-agent.exe" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...
 ```
+
+PowerShell is what an administrator gets by default on a currently supported
+Windows Server, and what WinRM gives a remote session, so it is the one written
+out in full above.
 
 There is no third step. The service checks every minute until it has been
 enrolled, so it picks that up within a minute and reports from then on — hourly,
