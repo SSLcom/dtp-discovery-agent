@@ -217,6 +217,44 @@ jobs:
           (Get-Service DTPAgent).WaitForStatus('Stopped', '00:00:30')
           Write-Host "stopped in $($sw.Elapsed.TotalSeconds)s"
 
+      # THE LINE IN THE README, RUN IN THE SHELL THE README NAMES.
+      #
+      # A documented command is a thing members copy, and this one is shell
+      # dependent in a way that is invisible from Linux: PowerShell parses a
+      # statement beginning with a quoted string as a string EXPRESSION, so the
+      # obvious spelling — path in quotes, arguments after it — never starts the
+      # agent. It fails with "Unexpected token 'enroll'", which reads as a
+      # broken download rather than as a shell rule.
+      #
+      # Both forms are run here, and BOTH assertions matter: the documented one
+      # has to work, and the one it replaced has to still be broken. Without the
+      # second, this step would go on passing if PowerShell ever stopped caring
+      # and the README's explanation quietly became folklore.
+      - name: The documented enrollment line runs in PowerShell
+        shell: pwsh
+        run: |
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          $args = 'enroll --server http://127.0.0.1:1 --account 00000000-0000-0000-0000-000000000000'
+
+          $documented = pwsh -NoProfile -Command "& `"$exe`" $args" 2>&1 | Out-String
+          Write-Host "documented form:`n$documented"
+          if ($documented -match 'Unexpected token') {
+            throw "the form the README documents does not parse in PowerShell"
+          }
+          # It cannot reach a server on port 1, so the agent's OWN error is the
+          # proof it ran at all rather than being parsed as a string.
+          if ($documented -notmatch 'registering with') {
+            throw "the documented form did not reach the agent"
+          }
+
+          $naive = pwsh -NoProfile -Command "`"$exe`" $args" 2>&1 | Out-String
+          Write-Host "form without the call operator:`n$naive"
+          if ($naive -notmatch 'Unexpected token') {
+            throw "the quoted-path form now works, so the README's explanation of why it does not is wrong"
+          }
+
+          $global:LASTEXITCODE = 0
+
       # The property an uninstall must not break. The state directory holds the
       # keypair DTP has already approved, so removing it would silently turn
       # every reinstall in an estate into a fresh round of approvals. `enroll`
