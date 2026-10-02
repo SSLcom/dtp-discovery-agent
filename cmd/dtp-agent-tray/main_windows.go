@@ -184,14 +184,7 @@ func run() error {
 	}
 	hwnd = windows.HWND(r)
 
-	size := systemMetric(smCxSmIcon)
-	if size <= 0 {
-		size = 16
-	}
-	for _, h := range []tray.Health{tray.Good, tray.Attention, tray.Problem, tray.Unknown} {
-		icons[h] = iconFromPNG(tray.Icon(h, size), size)
-	}
-
+	drawIcons()
 	refresh()
 	procSetTimer.Call(uintptr(hwnd), timerID, uintptr(refreshEvery/time.Millisecond), 0)
 
@@ -208,6 +201,36 @@ func run() error {
 		procDestroyIcon.Call(uintptr(icon))
 	}
 	return nil
+}
+
+// drawIcons makes one icon per health at the size and in the ink the taskbar
+// wants now. Called again when either changes, so the old handles are freed.
+func drawIcons() {
+	size := systemMetric(smCxSmIcon)
+	if size <= 0 {
+		size = 16
+	}
+	dark := taskbarIsDark()
+	for _, h := range []tray.Health{tray.Good, tray.Attention, tray.Problem, tray.Unknown} {
+		if old := icons[h]; old != 0 {
+			procDestroyIcon.Call(uintptr(old))
+		}
+		icons[h] = iconFromPNG(tray.Icon(h, size, dark), size)
+	}
+}
+
+// taskbarIsDark reads the setting Windows itself uses for the taskbar's
+// colour — SystemUsesLightTheme, which is separate from the APPS setting a
+// user can set the other way. Absent (Windows 10 before 1903) means dark,
+// which is what the taskbar was.
+func taskbarIsDark() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return true
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue("SystemUsesLightTheme")
+	return err != nil || v == 0
 }
 
 func wndProc(h windows.HWND, message uint32, wParam, lParam uintptr) uintptr {
@@ -232,6 +255,20 @@ func wndProc(h windows.HWND, message uint32, wParam, lParam uintptr) uintptr {
 		return 0
 	case wmTimer:
 		refresh()
+		return 0
+	case wmSettingChange:
+		// "ImmersiveColorSet" is what Windows broadcasts when the light/dark
+		// setting flips. Redrawing on every settings broadcast instead would
+		// be harmless but wasteful; on this one it is required, or a white
+		// mark sits invisible on a taskbar that has just turned light.
+		if lParam != 0 && windows.UTF16PtrToString(*(**uint16)(unsafe.Pointer(&lParam))) == "ImmersiveColorSet" {
+			drawIcons()
+			if added {
+				nid.UFlags = nifIcon
+				nid.HIcon = icons[current.Health]
+				shellNotifyIcon(nimModify, &nid)
+			}
+		}
 		return 0
 	case wmClose:
 		procDestroyWindow.Call(uintptr(h))

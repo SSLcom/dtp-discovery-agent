@@ -341,12 +341,14 @@ stdout or stderr is discarded.
 
 #### The notification-area icon
 
-The installer shows nothing but a progress bar. When it finishes, the agent's
-icon appears in the notification area by the clock: a **tick** when it is
-reporting, an **exclamation mark** when it needs a person (not enrolled yet,
-waiting for approval, or no report for three hours), a **bar** when it is
-stopped or the last report failed, and a **ring** when its state cannot be
-read. Hover over it for one line; click it for the detail and these actions:
+The installer shows nothing but a progress bar. When it finishes, the SSL.com
+pinwheel appears in the notification area by the clock, white on a dark taskbar
+and in the brand's ink on a light one. **The plain pinwheel means all is well.**
+Otherwise a badge in its corner says what is wrong: an amber **exclamation
+mark** when it needs a person (not enrolled yet, waiting for approval, or no
+report for three hours), a red **bar** when it is stopped or the last report
+failed, and a grey **ring** when its state cannot be read. Hover over it for one
+line; click it for the detail and these actions:
 
 - **Show full status…** runs `dtp-agent status` through an elevation prompt,
   in a window that stays open until you press Enter.

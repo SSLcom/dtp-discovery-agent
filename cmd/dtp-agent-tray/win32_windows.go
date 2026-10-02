@@ -45,14 +45,15 @@ var (
 )
 
 const (
-	wmDestroy     = 0x0002
-	wmClose       = 0x0010
-	wmNull        = 0x0000
-	wmTimer       = 0x0113
-	wmContextMenu = 0x007B
-	wmLButtonUp   = 0x0202
-	wmUser        = 0x0400
-	wmApp         = 0x8000
+	wmDestroy       = 0x0002
+	wmClose         = 0x0010
+	wmNull          = 0x0000
+	wmTimer         = 0x0113
+	wmSettingChange = 0x001A
+	wmContextMenu   = 0x007B
+	wmLButtonUp     = 0x0202
+	wmUser          = 0x0400
+	wmApp           = 0x8000
 
 	// The message the notification area sends this window about its icon.
 	wmTrayCallback = wmApp + 1
