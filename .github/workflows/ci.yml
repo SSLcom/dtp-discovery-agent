@@ -270,6 +270,11 @@ jobs:
           $password = "Tray-$([guid]::NewGuid().ToString('N').Substring(0, 16))!"
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name traytest -Password $secure -AccountNeverExpires | Out-Null
+          # Kept for the upgrade and uninstall steps, which need an icon that is
+          # NOT elevated: this runner is, and an elevated icon hands itself to
+          # the desktop's own user and leaves. A throwaway account on a
+          # throwaway machine.
+          "TRAYTEST_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
           $work = 'C:\traytest'
           New-Item -ItemType Directory $work | Out-Null
           icacls $work /grant 'traytest:(OI)(CI)M' | Out-Null
@@ -371,10 +376,16 @@ jobs:
       - name: Upgrading replaces a running icon and keeps the service
         shell: pwsh
         run: |
-          $dir = "$env:ProgramFiles\SSL.com\DTP Agent"
-          $tray = Start-Process "$dir\dtp-agent-tray.exe" -PassThru
+          # A standard user's icon, as on a real machine: this runner is
+          # elevated, and an elevated icon hands itself off and exits.
+          $cred = New-Object Management.Automation.PSCredential('traytest', (ConvertTo-SecureString $env:TRAYTEST_PASSWORD -AsPlainText -Force))
+          $tray = Start-Process "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe" -Credential $cred -WorkingDirectory 'C:\traytest' -PassThru
           Start-Sleep -Seconds 3
-          if ($tray.HasExited) { throw "the icon exited by itself, so this cannot show the upgrade stops it" }
+          if ($tray.HasExited) {
+            $mine = (Get-Process -Id $PID).SessionId
+            throw "the standard user's icon exited by itself (code $($tray.ExitCode), runner session $mine), so this cannot show it is stopped"
+          }
+          Write-Host "a standard user's icon is running: pid $($tray.Id), session $((Get-Process -Id $tray.Id).SessionId)"
 
           $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
           $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","upgrade.log" -Wait -PassThru
@@ -412,9 +423,16 @@ jobs:
           # An icon running while the package is removed: the installer has to
           # stop it, or the file is in use and removal finishes only at a
           # reboot — exit 3010, which the check below treats as a failure.
-          $tray = Start-Process "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe" -PassThru
+          # A standard user's icon, as on a real machine: this runner is
+          # elevated, and an elevated icon hands itself off and exits.
+          $cred = New-Object Management.Automation.PSCredential('traytest', (ConvertTo-SecureString $env:TRAYTEST_PASSWORD -AsPlainText -Force))
+          $tray = Start-Process "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe" -Credential $cred -WorkingDirectory 'C:\traytest' -PassThru
           Start-Sleep -Seconds 3
-          if ($tray.HasExited) { throw "the icon exited by itself, so this cannot show the uninstall stops it" }
+          if ($tray.HasExited) {
+            $mine = (Get-Process -Id $PID).SessionId
+            throw "the standard user's icon exited by itself (code $($tray.ExitCode), runner session $mine), so this cannot show it is stopped"
+          }
+          Write-Host "a standard user's icon is running: pid $($tray.Id), session $((Get-Process -Id $tray.Id).SessionId)"
 
           $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
           $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/l*v","uninstall.log" -Wait -PassThru
