@@ -283,3 +283,74 @@ func tokenize(d string) []string {
 	flush()
 	return toks
 }
+
+// AppIcon draws the icon the agent's files carry — the .exe in Explorer, the
+// Start-menu shortcut, Add/Remove Programs — as a PNG of size×size pixels.
+//
+// ON A TILE, unlike the notification-area icon. A file icon is one picture for
+// every background it will ever sit on, and Explorer and the Start menu are
+// each dark or light at the user's choice: the brand's ink vanishes on one and
+// white on the other. So the mark is drawn white on a rounded square of the
+// brand's ink, which reads on both — the way application icons usually solve
+// the same problem.
+func AppIcon(size int) []byte {
+	tile := color.NRGBA{brandInk[0], brandInk[1], brandInk[2], 255}
+	white := color.NRGBA{255, 255, 255, 255}
+	mark := pinwheel()
+
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	const (
+		ss     = 4
+		radius = 0.20 // corner radius, as a fraction of the tile
+	)
+	// The margin between the tile's edge and the mark: generous where there
+	// are pixels to spare, tight at the sizes Explorer's lists use, where a
+	// generous margin leaves the mark too small to read.
+	inset := 0.17
+	if size <= 24 {
+		inset = 0.10
+	}
+	s := float64(size)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			var r, g, b, a float64
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					ux := (float64(x) + (float64(sx)+0.5)/ss) / s
+					uy := (float64(y) + (float64(sy)+0.5)/ss) / s
+					if !inRoundedSquare(ux, uy, radius) {
+						continue
+					}
+					c := tile
+					mx, my := (ux-inset)/(1-2*inset), (uy-inset)/(1-2*inset)
+					if mx >= 0 && mx <= 1 && my >= 0 && my <= 1 && mark.contains(mx, my) {
+						c = white
+					}
+					r += float64(c.R)
+					g += float64(c.G)
+					b += float64(c.B)
+					a++
+				}
+			}
+			if a == 0 {
+				continue
+			}
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(math.Round(r / a)), G: uint8(math.Round(g / a)), B: uint8(math.Round(b / a)),
+				A: uint8(math.Round(a / (ss * ss) * 255)),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
+func inRoundedSquare(x, y, r float64) bool {
+	if x < 0 || x > 1 || y < 0 || y > 1 {
+		return false
+	}
+	cx := math.Min(math.Max(x, r), 1-r)
+	cy := math.Min(math.Max(y, r), 1-r)
+	return math.Hypot(x-cx, y-cy) <= r
+}

@@ -44,6 +44,22 @@ export SOURCE_DATE_EPOCH
 
 TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
 
+# THE WINDOWS RESOURCES: the SSL.com pinwheel as each .exe's icon — which is
+# also what the Start-menu shortcut shows — and version information for its
+# Properties dialog. Written as .syso files beside each main package, which the
+# Go linker picks up for the matching GOOS/GOARCH and ignores for every other.
+#
+# Removed again on the way out, however this script ends: a .syso left behind
+# would quietly change what a plain `go build` produces on the next Windows
+# build of a developer's tree. *.syso is in .gitignore for the same reason.
+WINRES="$ROOT/build/winres"
+cleanup_syso() { rm -f "$ROOT"/cmd/dtp-agent/rsrc_windows_*.syso "$ROOT"/cmd/dtp-agent-tray/rsrc_windows_*.syso; }
+trap cleanup_syso EXIT
+go run "$ROOT/script/winres" "$VERSION" "$WINRES"
+for bin in dtp-agent dtp-agent-tray; do
+  go tool go-winres make --in "$WINRES/$bin.json" --arch amd64,arm64 --out "$ROOT/cmd/$bin/rsrc"
+done
+
 for target in $TARGETS; do
   goos="${target%%/*}"
   goarch="${target##*/}"

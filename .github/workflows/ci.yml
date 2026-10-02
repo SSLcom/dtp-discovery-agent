@@ -244,6 +244,24 @@ jobs:
             throw "the sign-in entry is '$run'"
           }
 
+      # THE PINWHEEL ON THE FILES, read back as Windows reads it: an icon in
+      # each executable (which is also what the Start-menu shortcut shows) and
+      # the version information in its Properties. A build that lost the .syso
+      # would still produce working binaries with the generic icon, and nothing
+      # else here would notice.
+      - name: The installed files carry the pinwheel and their version
+        shell: pwsh
+        run: |
+          Add-Type -Namespace W -Name Shell -MemberDefinition '[DllImport("shell32.dll", CharSet=CharSet.Unicode)] public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint n);'
+          foreach ($exe in 'dtp-agent.exe', 'dtp-agent-tray.exe') {
+            $path = "$env:ProgramFiles\SSL.com\DTP Agent\$exe"
+            $icons = [W.Shell]::ExtractIconEx($path, -1, $null, $null, 0)
+            $info = (Get-Item $path).VersionInfo
+            Write-Host "$exe: $icons icon(s); $($info.CompanyName) / $($info.ProductName) / $($info.FileVersion)"
+            if ($icons -lt 1) { throw "$exe carries no icon" }
+            if ($info.CompanyName -ne 'SSL.com') { throw "$exe carries no version information (CompanyName '$($info.CompanyName)')" }
+          }
+
       # What the icon reads: published by the service, readable by Users, and
       # writable by none of them — inside a state directory that stays closed.
       - name: The service publishes a status any user can read and none can write

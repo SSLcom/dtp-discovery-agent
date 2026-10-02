@@ -32,6 +32,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="dtp-agent-wixl:0.101"
 
 STAGE="build/stage/windows_amd64"
+[ -f "$ROOT/build/winres/pinwheel.ico" ] || {
+  echo "missing build/winres/pinwheel.ico — run build-release.sh first" >&2
+  exit 1
+}
 for exe in dtp-agent.exe dtp-agent-tray.exe; do
   [ -x "$ROOT/$STAGE/$exe" ] || {
     echo "missing $STAGE/$exe — run build-release.sh first" >&2
@@ -71,6 +75,7 @@ docker run --rm -v "$ROOT":/work -w /work "$IMAGE" \
     -D ProductCode="$PRODUCT_CODE" \
     -D BinarySource="$STAGE/dtp-agent.exe" \
     -D TraySource="$STAGE/dtp-agent-tray.exe" \
+    -D IconSource="build/winres/pinwheel.ico" \
     -D LicenseSource="LICENSE" \
     -D ReadmeSource="README.md" \
     packaging/windows/dtp-agent.wxs

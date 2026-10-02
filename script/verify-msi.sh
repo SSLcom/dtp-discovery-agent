@@ -45,8 +45,13 @@ base="$(basename "$MSI")"
 # carriage returns, which matters more than it looks: wixl creates the
 # ServiceInstall TABLE even when nothing declared a service, so a dump that is
 # merely non-empty proves nothing at all. Only a data row does.
+#
+# The package is mounted READ-ONLY and the export runs in a scratch directory:
+# exporting a table with a binary column (Icon) writes that stream to a folder
+# named after the table in the working directory — which was dist/, as root, so
+# it would have been checksummed and published with the release.
 dump() {
-  docker run --rm -v "$dir":/m -w /m "$IMAGE" msiinfo export "$base" "$1" 2>/dev/null | tr -d '\r' || true
+  docker run --rm -v "$dir":/m:ro -w /tmp "$IMAGE" msiinfo export "/m/$base" "$1" 2>/dev/null | tr -d '\r' || true
 }
 rows() { dump "$1" | tail -n +4; }
 
@@ -106,6 +111,9 @@ check "the shortcut targets the icon's file itself" "$shortcut" "[INSTALLDIR]dtp
 
 check "the icon starts at every user's sign-in" "$(rows Registry)" 'CurrentVersion\Run'
 check "sign-in starts honour each user's opt-out" "$(rows Registry)" "--autostart"
+
+check "Add/Remove Programs shows the pinwheel" "$(rows Property)" "ARPPRODUCTICON	pinwheel.ico"
+check "the pinwheel icon is in the package"      "$(rows Icon)"     "pinwheel.ico"
 
 # EXACTLY TWO CUSTOM ACTIONS, both running the icon's own binary. Anything else
 # here would be the first thing in this package able to run arbitrary code at

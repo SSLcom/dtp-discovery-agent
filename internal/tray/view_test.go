@@ -273,3 +273,39 @@ func TestAnEnrollmentPollThatStoppedIsCalledOut(t *testing.T) {
 		t.Errorf("the minute-by-minute poll has been silent for 15 minutes and nothing says so: %+v", v)
 	}
 }
+
+// The file icon: a tile of the brand's ink with the mark in white on it, so it
+// reads on Explorer and the Start menu whether they are dark or light.
+func TestTheAppIconIsTheMarkOnATile(t *testing.T) {
+	for _, size := range []int{16, 32, 256} {
+		img, err := png.Decode(bytes.NewReader(AppIcon(size)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b := img.Bounds(); b.Dx() != size || b.Dy() != size {
+			t.Fatalf("%d px: bounds %v", size, b)
+		}
+		var white, ink int
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a < 0xffff {
+					continue
+				}
+				switch {
+				case r>>8 == 0xff && g>>8 == 0xff && b>>8 == 0xff:
+					white++
+				case r>>8 == 0x19 && g>>8 == 0x15 && b>>8 == 0x21:
+					ink++
+				}
+			}
+		}
+		if white == 0 || ink == 0 {
+			t.Errorf("%d px: %d white and %d ink pixels; want the mark in white on the brand's ink", size, white, ink)
+		}
+		// Rounded: the very corner is outside the tile.
+		if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
+			t.Errorf("%d px: the corner is filled; the tile is meant to be rounded", size)
+		}
+	}
+}

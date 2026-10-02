@@ -55,6 +55,15 @@
     -->
     <Condition Message="This installer registers a Windows service and must be run as an administrator.">Privileged</Condition>
 
+    <!--
+      The SSL.com pinwheel in Add/Remove Programs, which shows an icon file
+      rather than an executable's resource. The Start-menu shortcut needs
+      nothing: a non-advertised shortcut shows its target's own icon, and
+      dtp-agent-tray.exe carries the pinwheel (script/build-release.sh).
+    -->
+    <Icon Id="pinwheel.ico" SourceFile="$(var.IconSource)"/>
+    <Property Id="ARPPRODUCTICON" Value="pinwheel.ico"/>
+
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/SSLcom/dtp-discovery-agent"/>
     <Property Id="ARPHELPLINK" Value="https://github.com/SSLcom/dtp-discovery-agent/releases"/>
     <!-- Nothing here is repairable or configurable from Add/Remove Programs:
