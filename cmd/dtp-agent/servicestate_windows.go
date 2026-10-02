@@ -3,11 +3,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
-	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/SSLcom/dtp-discovery-agent/internal/service"
 )
@@ -24,31 +23,15 @@ import (
 // common answer (a member who unzipped the archive instead of running the
 // installer), and it is the answer that explains why nothing is happening.
 func serviceState() string {
-	m, err := mgr.Connect()
-	if err != nil {
-		// Connecting asks for full access to the service database, which needs
-		// an elevated prompt. Worth saying: the rest of this command works
-		// unelevated only until it reaches the state directory, so a member
-		// seeing this is one step from being confused by the next error too.
-		return fmt.Sprintf("unknown (%v) — try an administrator prompt", err)
+	state, err := service.Query()
+	if errors.Is(err, service.ErrNotInstalled) {
+		return "not installed — install the .msi, or the agent will only run when you run it"
 	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(service.Name)
-	if err != nil {
-		if err == windows.ERROR_SERVICE_DOES_NOT_EXIST {
-			return "not installed — install the .msi, or the agent will only run when you run it"
-		}
-		return fmt.Sprintf("unknown (%v)", err)
-	}
-	defer s.Close()
-
-	status, err := s.Query()
 	if err != nil {
 		return fmt.Sprintf("unknown (%v)", err)
 	}
 
-	switch status.State {
+	switch state {
 	case svc.Running:
 		return "running"
 	case svc.Stopped:
@@ -60,6 +43,6 @@ func serviceState() string {
 	case svc.Paused, svc.PausePending, svc.ContinuePending:
 		return "paused"
 	default:
-		return fmt.Sprintf("state %d", status.State)
+		return fmt.Sprintf("state %d", state)
 	}
 }

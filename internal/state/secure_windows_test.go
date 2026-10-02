@@ -205,3 +205,64 @@ func TestSystemCanReadTheKeyWhoeverCreatedIt(t *testing.T) {
 		t.Error("the service account cannot read the key, so the agent would stop reporting after a restart")
 	}
 }
+
+// The public status is the one thing in the state directory every local user
+// may read — and only read. Either half failing is a real bug: closed, and the
+// notification-area icon can say nothing; writable, and any user can make every
+// icon on the machine say whatever they like.
+func TestThePublicStatusIsReadableByUsersAndWritableByNoneOfThem(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WritePublicStatus(&PublicStatus{Phase: PhaseNotEnrolled}); err != nil {
+		t.Fatal(err)
+	}
+	users := wellKnown(t, windows.WinBuiltinUsersSid)
+
+	for _, path := range []string{filepath.Dir(PublicStatusPath(store.Dir())), PublicStatusPath(store.Dir())} {
+		_, aces := readDACL(t, path)
+		found := false
+		for _, entry := range aces {
+			if !entry.sid.Equals(users) {
+				continue
+			}
+			found = true
+			// The generic rights are mapped to file-specific bits when the ACE
+			// lands on a file, so check the bits that matter in both forms.
+			const writes = windows.GENERIC_WRITE | windows.GENERIC_ALL | windows.FILE_WRITE_DATA |
+				windows.FILE_APPEND_DATA | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER
+			if entry.mask&writes != 0 {
+				t.Errorf("Users can modify %s (mask %#x)", path, entry.mask)
+			}
+		}
+		if !found {
+			t.Errorf("Users cannot read %s, so the icon has nothing to show", path)
+		}
+	}
+
+	// The parent must not have been opened up to make that work.
+	if _, aces := readDACL(t, store.Dir()); grants(aces, users) {
+		t.Error("publishing the status opened the directory holding the private key to Users")
+	}
+}
+
+// Open re-secures the state directory every time, and a DACL set on a parent
+// propagates to every child that is not protected. If the public directory were
+// not protected, the next `dtp-agent status` would quietly close it again and
+// the icon would go blank until the service next wrote.
+func TestReopeningTheStateDirectoryKeepsThePublicStatusReadable(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WritePublicStatus(&PublicStatus{Phase: PhaseNotEnrolled}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(store.Dir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, aces := readDACL(t, PublicStatusPath(store.Dir())); !grants(aces, wellKnown(t, windows.WinBuiltinUsersSid)) {
+		t.Error("re-securing the state directory took Users' read access off the public status")
+	}
+}

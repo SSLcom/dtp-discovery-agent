@@ -22,3 +22,13 @@ func secure(path string, want os.FileMode) error {
 	}
 	return nil
 }
+
+// secureReadable opens the public status directory to every local user for
+// reading. Only the Windows service publishes one today; this exists so the
+// package builds and tests the same everywhere.
+func secureReadable(dir string) error {
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return fmt.Errorf("securing %s: %w", dir, err)
+	}
+	return nil
+}

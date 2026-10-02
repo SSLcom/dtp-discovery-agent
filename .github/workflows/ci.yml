@@ -205,6 +205,99 @@ jobs:
           if ($out -notmatch 'service\s+running') { throw "status does not report the service as running" }
           if ($out -notmatch 'enrolled\s+no')     { throw "status does not report that the agent is unenrolled" }
 
+      # THE NOTIFICATION-AREA ICON, as installed: the file, the Start-menu
+      # shortcut and the sign-in entry. Read back from the machine, not the
+      # package, because the package can carry a row Windows declines to act on.
+      - name: The icon is installed, in the Start menu, and starts at sign-in
+        shell: pwsh
+        run: |
+          $dir = "$env:ProgramFiles\SSL.com\DTP Agent"
+          if (-not (Test-Path "$dir\dtp-agent-tray.exe")) { throw "dtp-agent-tray.exe was not installed" }
+
+          $lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\DTP Agent.lnk"
+          if (-not (Test-Path $lnk)) { throw "no Start-menu shortcut at $lnk" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
+          Write-Host "shortcut -> $target"
+          if ($target -ne "$dir\dtp-agent-tray.exe") { throw "the shortcut points at '$target'" }
+
+          $run = (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run').DTPAgentTray
+          Write-Host "Run: $run"
+          if ($run -notmatch [regex]::Escape("$dir\dtp-agent-tray.exe") -or $run -notmatch '--autostart') {
+            throw "the sign-in entry is '$run'"
+          }
+
+      # What the icon reads: published by the service, readable by Users, and
+      # writable by none of them — inside a state directory that stays closed.
+      - name: The service publishes a status any user can read and none can write
+        shell: pwsh
+        run: |
+          $state = "$env:ProgramData\DTP\agent"
+          $file = "$state\public\status.json"
+          for ($i = 0; $i -lt 30 -and -not (Test-Path $file); $i++) { Start-Sleep -Seconds 1 }
+          if (-not (Test-Path $file)) { throw "the service published no status at $file" }
+          $st = Get-Content $file -Raw | ConvertFrom-Json
+          Write-Host ($st | ConvertTo-Json)
+          if ($st.phase -ne 'not_enrolled') { throw "phase is '$($st.phase)', want not_enrolled" }
+
+          $users = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-545').Translate([Security.Principal.NTAccount]).Value
+          $writes = 'Write|Modify|FullControl|Delete|ChangePermissions|TakeOwnership'
+          foreach ($path in @("$state\public", $file)) {
+            $rules = (Get-Acl $path).Access | Where-Object { $_.IdentityReference.Value -eq $users }
+            if (-not $rules) { throw "$users cannot read $path" }
+            foreach ($r in $rules) {
+              if ($r.FileSystemRights.ToString() -match $writes) { throw "$users holds $($r.FileSystemRights) on $path" }
+            }
+          }
+          if ((Get-Acl $state).Access | Where-Object { $_.IdentityReference.Value -eq $users }) {
+            throw "$users can read the directory holding the agent's private key"
+          }
+
+      # THE READ THE ICON EXISTS TO MAKE, made by someone who is not an
+      # administrator. Everything above is the runner — an administrator —
+      # looking at ACLs; this is a real standard user opening the file through
+      # a directory they cannot list, which only works if "bypass traverse
+      # checking" does what public.go says it does. The shipped binary does the
+      # reading, through the code the icon uses.
+      - name: A standard user's icon can read the status
+        shell: pwsh
+        run: |
+          $password = "Tray-$([guid]::NewGuid().ToString('N').Substring(0, 16))!"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name traytest -Password $secure -AccountNeverExpires | Out-Null
+          $work = 'C:\traytest'
+          New-Item -ItemType Directory $work | Out-Null
+          icacls $work /grant 'traytest:(OI)(CI)M' | Out-Null
+
+          $tray = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe"
+          $cred = New-Object Management.Automation.PSCredential('traytest', $secure)
+          $p = Start-Process $tray -ArgumentList '--print' -Credential $cred -WorkingDirectory $work `
+                 -RedirectStandardOutput "$work\out.txt" -RedirectStandardError "$work\err.txt" -Wait -PassThru
+          $out = Get-Content "$work\out.txt" -Raw
+          Write-Host "as a standard user:`n$out"
+          Get-Content "$work\err.txt" -Raw
+          if ($out -notmatch 'not enrolled') { throw "a standard user's icon could not see that the agent is waiting to be enrolled" }
+          if ($out -match 'Cannot read')     { throw "a standard user's icon cannot read the status" }
+
+      # DOUBLE-CLICKED, THE AGENT HOLDS ITS WINDOW OPEN; RUN FROM A PROMPT, IT
+      # DOES NOT. Start-Process without redirection goes through the shell, as
+      # Explorer does, and gives the process a console of its own. Both halves
+      # are asserted: a hold that also fired at a prompt would hang every
+      # script that runs the agent.
+      - name: Double-clicked, the agent explains itself instead of vanishing
+        shell: pwsh
+        run: |
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          $p = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 3
+          if ($p.HasExited) { throw "started on its own console, the agent exited (code $($p.ExitCode)) and took the window with it" }
+          Stop-Process -Id $p.Id
+
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          & $exe 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 2) { throw "from a prompt, no arguments exited $LASTEXITCODE, want 2" }
+          if ($sw.Elapsed.TotalSeconds -gt 10) { throw "from a prompt the agent waited for a key press" }
+          $global:LASTEXITCODE = 0
+
       # Stopping must be prompt. The Service Control Manager kills a service
       # that stops answering while it shuts down, and what the administrator
       # sees is an error about the agent rather than a scan closing its
@@ -274,6 +367,13 @@ jobs:
           $key = "$env:ProgramData\DTP\agent\agent.key"
           if (-not (Test-Path $key)) { throw "enroll left no keypair to protect" }
 
+          # An icon running while the package is removed: the installer has to
+          # stop it, or the file is in use and removal finishes only at a
+          # reboot — exit 3010, which the check below treats as a failure.
+          $tray = Start-Process "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe" -PassThru
+          Start-Sleep -Seconds 3
+          if ($tray.HasExited) { throw "the icon exited by itself, so this cannot show the uninstall stops it" }
+
           $msi = (Get-ChildItem dist\*.msi)[0].FullName
           $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/l*v","uninstall.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) {
@@ -283,7 +383,11 @@ jobs:
 
           if (Get-Service DTPAgent -ErrorAction SilentlyContinue) { throw "the service outlived the uninstall" }
           if (-not (Test-Path $key)) { throw "uninstalling deleted the agent's keypair" }
-          Write-Host "service gone, keypair kept"
+          if (Get-Process -Id $tray.Id -ErrorAction SilentlyContinue) { throw "the icon outlived the uninstall" }
+          if (Test-Path "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent-tray.exe") { throw "the icon's file outlived the uninstall" }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\DTP Agent.lnk") { throw "the Start-menu shortcut outlived the uninstall" }
+          if ((Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run').DTPAgentTray) { throw "the sign-in entry outlived the uninstall" }
+          Write-Host "service, icon, shortcut and sign-in entry gone; keypair kept"
 
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops
@@ -319,4 +423,6 @@ jobs:
           # portable artefact this is supposed to be, and it would pick up a
           # glibc version requirement from whatever built it.
           CGO_ENABLED: '0'
-        run: go build -ldflags "-s -w" -o /dev/null ./cmd/dtp-agent
+        # ./... so the notification-area icon is built for every target too:
+        # it is Windows code behind a build tag, and a stub everywhere else.
+        run: go build -ldflags "-s -w" ./...

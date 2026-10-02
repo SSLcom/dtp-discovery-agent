@@ -21,6 +21,17 @@ import (
 type reporter struct {
 	info func(format string, args ...any)
 	warn func(format string, args ...any)
+
+	// phase, when set, is told each time the cycle moves to a new stage — one
+	// of the state.Phase values. The Windows service publishes it for the
+	// notification-area icon; the command line has nobody to tell.
+	phase func(phase string)
+}
+
+func (r reporter) enter(phase string) {
+	if r.phase != nil {
+		r.phase(phase)
+	}
 }
 
 func consoleReporter() reporter {
@@ -74,6 +85,7 @@ func reportOnce(ctx context.Context, dir string, override, disabled []string, on
 		}
 	}
 
+	out.enter(state.PhaseScanning)
 	started := time.Now()
 	results := runCollectors(ctx, cfg, override, disabled)
 	runID := fmt.Sprintf("%s-%d", fingerprint[:12], started.UTC().Unix())
@@ -123,6 +135,7 @@ func authenticate(ctx context.Context, client *transport.Client, signer *transpo
 			if once {
 				return err
 			}
+			out.enter(state.PhasePending)
 			out.warn("waiting for approval; retrying in %s", pending.RetryAfter)
 			select {
 			case <-ctx.Done():

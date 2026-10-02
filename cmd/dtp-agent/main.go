@@ -54,9 +54,26 @@ const usage = `dtp-agent — certificate discovery for the Digital Trust Platfor
 `
 
 func main() {
+	// Asked once, up front: whether Windows made a console for this process
+	// alone, which means a person double-clicked it (or a shortcut, or an
+	// elevation prompt, started it) and the window vanishes the moment we exit.
+	// See console_windows.go.
+	alone := ownsConsole()
+	code := run(alone)
+	if alone {
+		holdConsole()
+	}
+	os.Exit(code)
+}
+
+func run(alone bool) int {
 	if len(os.Args) < 2 {
+		if alone {
+			explainYourself()
+			return 0
+		}
 		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,13 +97,43 @@ func main() {
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
-		os.Exit(2)
+		return 2
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dtp-agent: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+// explainYourself is what a person who double-clicked the binary sees.
+//
+// NOT THE USAGE. Somebody who opened this from Explorer has just installed the
+// agent and is looking for it; a page of flags answers a question they have
+// not asked. What they need is: there is no window, here is where the agent
+// actually is, and here is the one command that comes next.
+func explainYourself() {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "dtp-agent.exe"
+	}
+	fmt.Println("DTP certificate discovery agent " + Version)
+	fmt.Println()
+	fmt.Println("This is the agent's command-line tool, so it has no window of its own.")
+	fmt.Println("The agent runs in the background as the \"DTP Certificate Discovery")
+	fmt.Println("Agent\" Windows service, and its icon in the notification area, by the")
+	fmt.Println("clock, shows what it is doing.")
+	if st := serviceState(); st != "" {
+		fmt.Println()
+		fmt.Printf("  service   %s\n", st)
+	}
+	fmt.Println()
+	fmt.Println("To enroll this machine, open PowerShell as an administrator and run:")
+	fmt.Println()
+	fmt.Printf("  & \"%s\" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...\n", exe)
+	fmt.Println()
+	fmt.Println("Every command:  dtp-agent.exe help")
 }
 
 func stateFlag(fs *flag.FlagSet) *string {

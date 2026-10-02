@@ -295,7 +295,7 @@ which is also where `VERSION` comes from:
 msiexec /i dtp-agent_VERSION_windows_amd64.msi /qn
 ```
 
-The installer puts the binary in `C:\Program Files\SSL.com\DTP Agent`,
+The installer puts the agent and its notification-area icon in `C:\Program Files\SSL.com\DTP Agent`,
 registers the **DTP Certificate Discovery Agent** service (`DTPAgent`) to start
 automatically, and starts it. Then enroll it, from an administrator **PowerShell**
 prompt:
@@ -338,6 +338,43 @@ was reported. The service's own log is `%ProgramData%\DTP\agent\agent.log`,
 which is where the lines that go to the journal on Linux end up — a service
 started by the Service Control Manager has no terminal, so anything written to
 stdout or stderr is discarded.
+
+#### The notification-area icon
+
+The installer shows nothing but a progress bar. When it finishes, the agent's
+icon appears in the notification area by the clock: a **tick** when it is
+reporting, an **exclamation mark** when it needs a person (not enrolled yet,
+waiting for approval, or no report for three hours), a **bar** when it is
+stopped or the last report failed, and a **ring** when its state cannot be
+read. Hover over it for one line; click it for the detail and these actions:
+
+- **Show full status…** runs `dtp-agent status` through an elevation prompt,
+  in a window that stays open until you press Enter.
+- **Open DTP** opens the server the agent reports to.
+- **How to enroll this machine…** appears while it is not enrolled and opens
+  this section.
+- **Show this icon at sign-in** is a per-user setting. Clear it and the icon
+  stops appearing at *your* sign-in; other users are unaffected.
+
+The icon starts at every user's sign-in, and **DTP Agent** in the Start menu
+opens it again for anyone who closed it or turned it off. It is a separate
+program, `dtp-agent-tray.exe`, that runs as you, unelevated, and holds none of
+the agent's credentials. A silent install (`/qn`) does not start it, because
+that is a configuration tool running somewhere nobody is looking; it appears at
+the next sign-in instead.
+
+**What the icon reads is readable by every local user.** The state directory is
+closed to everyone but SYSTEM and the administrators, and under UAC even an
+administrator's icon runs without that access. So the service publishes a short
+summary for it at `%ProgramData%\DTP\agent\public\status.json`: what it is
+doing, when it last reported, how many certificates it found, the last error,
+and the DTP address it reports to. No key, no account id, no agent id and no
+fingerprint. Users can read that one file and cannot change it. It sits inside
+the protected directory so that nobody can create it first or redirect it.
+
+**Double-clicking `dtp-agent.exe`** opens a window that explains where the agent
+is, shows whether the service is running, and gives the enrollment line. Then it
+waits for Enter. Run from a prompt, it behaves exactly as it always has.
 
 **Windows on ARM has no installer.** wixl, which is what lets the MSI be built
 on Linux alongside everything else, cannot emit an arm64 package. The arm64 zip
