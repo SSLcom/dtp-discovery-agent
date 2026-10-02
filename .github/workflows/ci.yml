@@ -117,6 +117,13 @@ jobs:
       - name: A later installer, to upgrade to
         run: script/build-msi.sh 0.0.1-ci
 
+      # And one numbered above every real release, for the job that upgrades
+      # FROM a real release. The installer refuses a lower version as a
+      # downgrade (Bugbot caught 0.0.1 being used for it), so this is the only
+      # number that job can upgrade to — whatever has been published by then.
+      - name: An installer newer than any release
+        run: script/build-msi.sh 999.0.0-ci
+
       # The installer's REFUSALS are the part worth testing. One that verifies
       # on the happy path and waves everything else through has the security
       # properties of one that does not verify at all.
@@ -488,7 +495,7 @@ jobs:
       # Enrolled the way the README says: from an elevated prompt. The server is
       # unreachable, so enroll writes the key and stops; the configuration it
       # would have saved is written here instead, from the same prompt, so both
-      # files are owned the way a real enrolment leaves them.
+      # files are owned the way a real enrollment leaves them.
       - name: Enroll it as an administrator would
         shell: pwsh
         run: |
@@ -500,7 +507,7 @@ jobs:
             Set-Content -NoNewline "$state\config.json"
 
           # Owned by the administrator's own account, as "Object creator"
-          # policy or an unelevated v0.3 enrolment leaves them. This runner's
+          # policy or an unelevated v0.3 enrollment leaves them. This runner's
           # policy gives them to the group, so it is set here — and then
           # checked, because if they were the group's this job would pass
           # whatever the new code did with an administrator's files.
@@ -521,7 +528,7 @@ jobs:
       - name: Upgrade to this build, and the agent keeps its identity
         shell: pwsh
         run: |
-          $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
+          $msi = (Resolve-Path dist\dtp-agent_999.0.0-ci_windows_amd64.msi).Path
           $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","upgrade.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content upgrade.log -Tail 80; throw "the upgrade exited $($p.ExitCode)" }
 
