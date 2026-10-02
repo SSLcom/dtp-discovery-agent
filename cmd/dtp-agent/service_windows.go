@@ -60,7 +60,9 @@ func runService(dir string) error {
 	defer log.Close()
 
 	log.Printf("service starting: dtp-agent %s, state %s", Version, store.Dir())
-	err = svc.Run(service.Name, &handler{dir: store.Dir(), log: log})
+	h := &handler{dir: store.Dir(), log: log}
+	h.publishResting()
+	err = svc.Run(service.Name, h)
 	if err != nil {
 		log.Printf("service failed: %v", err)
 		return err
@@ -72,6 +74,12 @@ func runService(dir string) error {
 type handler struct {
 	dir string
 	log *service.Log
+
+	// The last publishing failure logged, so a failure that repeats every
+	// minute is written once rather than interleaved with the enrollment
+	// poll's own line — which defeats the log's repeat-collapsing and fills
+	// it in days.
+	lastPublishErr string
 }
 
 func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
@@ -150,13 +158,95 @@ func (h *handler) enrolled() bool {
 		return false
 	}
 	_, err = store.LoadConfig()
-	return err == nil
+	if err != nil {
+		// Published at every poll, not once: the file's timestamp moving is
+		// how the icon can tell a waiting service from a wedged one.
+		h.publish(state.PhaseNotEnrolled, nil)
+		return false
+	}
+	return true
 }
 
 // scan does exactly what `dtp-agent run` does, including waiting out a pending
 // approval rather than giving up for an hour — the service is already resident,
 // and an admin who approves an agent should not watch nothing happen.
 func (h *handler) scan(ctx context.Context) error {
-	out := reporter{info: h.log.Printf, warn: h.log.Printf}
-	return reportOnce(ctx, h.dir, nil, nil, false, out)
+	out := reporter{
+		info:  h.log.Printf,
+		warn:  h.log.Printf,
+		phase: func(phase string) { h.publish(phase, nil) },
+	}
+	err := reportOnce(ctx, h.dir, nil, nil, false, out)
+	if phase, cause, resting := outcome(ctx.Err(), err); resting {
+		h.publishResting()
+	} else {
+		h.publish(phase, cause)
+	}
+	return err
+}
+
+// publishResting publishes what is true between cycles, worked out from what is
+// on disk: at startup, before the first scan's boot delay has run out, and when
+// a stop interrupts a scan.
+func (h *handler) publishResting() {
+	store, err := state.Open(h.dir)
+	if err != nil {
+		return
+	}
+	if _, err := store.LoadConfig(); err != nil {
+		h.publish(state.PhaseNotEnrolled, nil)
+		return
+	}
+	last, _ := store.LoadLastRun()
+	switch {
+	case last == nil:
+		h.publish(state.PhaseScheduled, nil)
+	case last.Error != "":
+		// Only the text survives on disk, not the error's type, so this can
+		// only ever classify as the generic failure — which is the point:
+		// publicError never repeats text it did not write itself.
+		h.publish(state.PhaseFailed, errors.New(last.Error))
+	default:
+		h.publish(state.PhaseReporting, nil)
+	}
+}
+
+// publish writes the summary the notification-area icon reads.
+//
+// BEST EFFORT, and deliberately so. The icon is a convenience for a person
+// looking at the machine; the inventory is the product. A failure here is
+// logged and the cycle carries on — a host that stopped reporting because it
+// could not update an icon would be the wrong way round.
+//
+// THE ERROR GOES THROUGH publicError AND NOWHERE ELSE. This file is readable by
+// every user of the machine; see publicerror.go for what that rules out.
+func (h *handler) publish(phase string, cause error) {
+	store, err := state.Open(h.dir)
+	if err != nil {
+		h.publishFailed(err)
+		return
+	}
+	st := &state.PublicStatus{Version: Version, Phase: phase, LastError: publicError(cause)}
+	if cfg, err := store.LoadConfig(); err == nil {
+		st.ServerURL = publicServerURL(cfg.ServerURL)
+	}
+	if last, err := store.LoadLastRun(); err == nil && last != nil {
+		st.LastRunAt = last.FinishedAt
+		st.Observed, st.Recorded, st.Rejected = last.Observed, last.Recorded, last.Rejected
+	}
+	if err := store.WritePublicStatus(st); err != nil {
+		h.publishFailed(err)
+		return
+	}
+	if h.lastPublishErr != "" {
+		h.log.Printf("publishing status works again")
+		h.lastPublishErr = ""
+	}
+}
+
+func (h *handler) publishFailed(err error) {
+	if msg := err.Error(); msg != h.lastPublishErr {
+		h.log.Printf("publishing status for the notification-area icon: %v", err)
+		h.lastPublishErr = msg
+	}
 }

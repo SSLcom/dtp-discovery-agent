@@ -65,14 +65,72 @@ func secure(path string, want os.FileMode) error {
 //     them buys no security at all — it only breaks backup, migration and
 //     support, and leaves a file whose permissions look stricter than they are.
 func ownerOnlyDACL(isDir bool) (*windows.ACL, error) {
-	// A directory's entries must inherit the restriction, or a key file created
-	// inside it afterwards picks up nothing and the protection lasts exactly as
-	// long as the directory is empty.
-	inheritance := uint32(windows.NO_INHERITANCE)
-	if isDir {
-		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	entries, err := ownerEntries(inheritanceFor(isDir))
+	if err != nil {
+		return nil, err
 	}
+	// Built from the entries alone, with no ACL to merge into: anything already
+	// on the object is REPLACED rather than added to, which is what makes this
+	// work on a key that a previous version left open.
+	return windows.ACLFromEntries(entries, nil)
+}
 
+// A directory's entries must inherit the restriction, or a key file created
+// inside it afterwards picks up nothing and the protection lasts exactly as
+// long as the directory is empty.
+func inheritanceFor(isDir bool) uint32 {
+	if isDir {
+		return windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
+	return windows.NO_INHERITANCE
+}
+
+// secureReadable is secure's one exception: the public status directory, which
+// the same three identities control and every local user may READ. See
+// public.go for why it is safe for this to sit inside the state directory, and
+// why it must.
+//
+// Protected like the rest, so that it does not inherit the parent's
+// owner-only ACL (which would lock the icon out) — and so that nothing the
+// parent is later given reaches it either.
+func secureReadable(dir string) error {
+	inheritance := inheritanceFor(true)
+	entries, err := ownerEntries(inheritance)
+	if err != nil {
+		return fmt.Errorf("securing %s: %w", dir, err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		return fmt.Errorf("resolving the Users group: %w", err)
+	}
+	// READ, and nothing that writes: an unprivileged user who could replace
+	// this file could make every icon on the machine say whatever they liked.
+	entries = append(entries, windows.EXPLICIT_ACCESS{
+		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_EXECUTE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       inheritance,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_UNKNOWN,
+			TrusteeValue: windows.TrusteeValueFromSID(users),
+		},
+	})
+	dacl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return fmt.Errorf("securing %s: %w", dir, err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		dir,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil,
+	); err != nil {
+		return fmt.Errorf("securing %s: %w", dir, err)
+	}
+	return nil
+}
+
+func ownerEntries(inheritance uint32) ([]windows.EXPLICIT_ACCESS, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, fmt.Errorf("reading this process's own user: %w", err)
@@ -110,11 +168,7 @@ func ownerOnlyDACL(isDir bool) (*windows.ACL, error) {
 			},
 		})
 	}
-
-	// Built from the entries alone, with no ACL to merge into: anything already
-	// on the object is REPLACED rather than added to, which is what makes this
-	// work on a key that a previous version left open.
-	return windows.ACLFromEntries(entries, nil)
+	return entries, nil
 }
 
 func containsSID(haystack []*windows.SID, needle *windows.SID) bool {

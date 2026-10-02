@@ -234,6 +234,19 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("server returned %d: %s", e.Code, strings.TrimSpace(e.Body))
 }
 
+// HTTPStatus reports the HTTP status of a failed request, without its body.
+//
+// The body is the part a server or a proxy in the way chose to say, and it can
+// be anything — which is why this exists: a summary meant for every user of the
+// machine can name the code and leave the body to the administrator's log.
+func HTTPStatus(err error) (int, bool) {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.Code, true
+	}
+	return 0, false
+}
+
 // do performs one request and RETURNS THE STATUS CODE alongside the error.
 //
 // The code matters because 202 is a success as far as HTTP is concerned and a

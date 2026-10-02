@@ -61,6 +61,16 @@ for target in $TARGETS; do
     go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
     -o "$stage/$name" "$ROOT/cmd/dtp-agent"
 
+  # The notification-area icon, Windows only. -H windowsgui marks it a GUI
+  # program, so starting it at sign-in opens no console window; it is the only
+  # difference from the agent's own build line, and the reproducibility check
+  # covers it the same way.
+  if [ "$goos" = "windows" ]; then
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=${VERSION}" \
+      -o "$stage/dtp-agent-tray.exe" "$ROOT/cmd/dtp-agent-tray"
+  fi
+
   cp "$ROOT/LICENSE" "$ROOT/README.md" "$stage/"
 
   base="dtp-agent_${VERSION}_${goos}_${goarch}"

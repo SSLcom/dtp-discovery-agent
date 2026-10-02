@@ -124,6 +124,45 @@
                               Wait="yes"/>
             </Component>
 
+            <!--
+              THE NOTIFICATION-AREA ICON. Without it, installing the agent
+              showed a progress bar and then nothing — and a member who has
+              just run an installer and seen nothing concludes it failed. It
+              is a separate, unprivileged program (dtp-agent-tray.exe, built
+              as a GUI binary so starting it opens no console) that reads what
+              the service publishes for it; see internal/state/public.go.
+
+              Started at EVERY USER'S sign-in, from HKLM's Run key, because a
+              per-machine install cannot write any other user's profile. Each
+              user can turn it off for themselves from the icon's own menu;
+              the autostart flag is what tells it to honour that choice, so the
+              Start-menu entry below still opens it for someone who turned it
+              off and wants it back once.
+            -->
+            <Component Id="Tray" Guid="5E0C3D1A-8B7F-4C2E-9A41-2F6D7B3C8E90" Win64="yes">
+              <File Id="dtp_agent_tray_exe"
+                    Name="dtp-agent-tray.exe"
+                    Source="$(var.TraySource)"
+                    KeyPath="yes"/>
+              <RegistryValue Root="HKLM"
+                             Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                             Name="DTPAgentTray"
+                             Type="string"
+                             Value="&quot;[INSTALLDIR]dtp-agent-tray.exe&quot; --autostart"/>
+              <!--
+                NOT ADVERTISED. A shortcut nested inside <File> comes out of
+                wixl as an advertised one, targeting the feature rather than the
+                file — measured — which makes Windows Installer check the
+                installation every time it is clicked.
+              -->
+              <Shortcut Id="TrayStartMenu"
+                        Directory="ProgramMenuFolder"
+                        Name="DTP Agent"
+                        Description="Shows whether the DTP certificate discovery agent on this machine is enrolled and reporting."
+                        Target="[INSTALLDIR]dtp-agent-tray.exe"
+                        WorkingDirectory="INSTALLDIR"/>
+            </Component>
+
             <Component Id="Docs" Guid="01EE209E-41ED-4308-A88B-23EB60849B4B" Win64="yes">
               <File Id="license_txt" Name="LICENSE.txt" Source="$(var.LicenseSource)" KeyPath="yes"/>
               <File Id="readme_md" Name="README.md" Source="$(var.ReadmeSource)"/>
@@ -132,10 +171,53 @@
           </Directory>
         </Directory>
       </Directory>
+      <Directory Id="ProgramMenuFolder"/>
     </Directory>
+
+    <!--
+      THE INSTALLER'S ONLY TWO ACTIONS OF ITS OWN, both about the icon, and
+      neither able to reach the state directory: each runs the icon's own
+      binary, with a fixed argument, and nothing else. TestPackagingMatchesTheServiceSpec
+      holds the list to exactly these two.
+
+      SEQUENCED BY NUMBER, NOT BY After=. wixl honours Sequence= and Before=,
+      but After= puts the action at the end of the table whatever it names —
+      measured: After="InstallInitialize" landed it after InstallFinalize,
+      where a deferred action is an error that fails the whole install.
+      script/verify-msi.sh checks the order in the built package.
+
+      StopTray ends every running copy of the icon, in every session, before
+      the file is replaced or removed. Deferred and not impersonated, so it
+      runs as SYSTEM and can reach other users' sessions. Only when the icon is
+      already installed (?Tray=3): on a first install there is nothing to stop
+      and no file yet to run. Its exit code is ignored, because an icon that
+      could not be stopped costs a reboot, not an install.
+
+      LaunchTray shows the icon to the person who just ran the installer, so
+      the install ends with something on the screen. Not on a silent install
+      (UILevel 2, `/qn`): that is a configuration tool, often running as
+      SYSTEM in a session nobody is looking at, and the icon arrives at the
+      next sign-in instead.
+    -->
+    <CustomAction Id="StopTray"
+                  FileKey="dtp_agent_tray_exe"
+                  ExeCommand="--stop-all"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore"/>
+    <CustomAction Id="LaunchTray"
+                  FileKey="dtp_agent_tray_exe"
+                  ExeCommand="--installed"
+                  Impersonate="yes"
+                  Return="asyncNoWait"/>
+    <InstallExecuteSequence>
+      <Custom Action="StopTray" Sequence="1550">?Tray=3</Custom>
+      <Custom Action="LaunchTray" Sequence="6601">UILevel &gt; 2 AND NOT REMOVE</Custom>
+    </InstallExecuteSequence>
 
     <Feature Id="Complete" Title="DTP Certificate Discovery Agent" Level="1">
       <ComponentRef Id="Agent"/>
+      <ComponentRef Id="Tray"/>
       <ComponentRef Id="Docs"/>
     </Feature>
 

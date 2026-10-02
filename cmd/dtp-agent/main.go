@@ -54,9 +54,39 @@ const usage = `dtp-agent — certificate discovery for the Digital Trust Platfor
 `
 
 func main() {
+	// Asked once, up front: whether Windows made a console for this process
+	// alone, which means a person double-clicked it (or a shortcut, or an
+	// elevation prompt, started it) and the window vanishes the moment we exit.
+	// See console_windows.go.
+	alone := ownsConsole()
+	code := run(alone)
+	if alone && holdsItsWindow(os.Args[1:]) {
+		holdConsole()
+	}
+	os.Exit(code)
+}
+
+// holdsItsWindow is the short list of invocations a PERSON starts in order to
+// read the answer: the binary on its own (a double-click) and `status` (what
+// the notification-area icon opens through an elevation prompt).
+//
+// NOT EVERY COMMAND. A scheduled task, or a wrapper that starts the agent with
+// a console of its own, looks exactly like a double-click from in here, and a
+// `run` that waited for Enter would sit there for good — and on Task Scheduler,
+// block every later run of the same task behind it. Neither of these two does
+// anything a schedule would want.
+func holdsItsWindow(args []string) bool {
+	return len(args) == 0 || args[0] == "status"
+}
+
+func run(alone bool) int {
 	if len(os.Args) < 2 {
+		if alone {
+			explainYourself()
+			return 0
+		}
 		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,13 +110,43 @@ func main() {
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
-		os.Exit(2)
+		return 2
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dtp-agent: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+// explainYourself is what a person who double-clicked the binary sees.
+//
+// NOT THE USAGE. Somebody who opened this from Explorer has just installed the
+// agent and is looking for it; a page of flags answers a question they have
+// not asked. What they need is: there is no window, here is where the agent
+// actually is, and here is the one command that comes next.
+func explainYourself() {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "dtp-agent.exe"
+	}
+	fmt.Println("DTP certificate discovery agent " + Version)
+	fmt.Println()
+	fmt.Println("This is the agent's command-line tool, so it has no window of its own.")
+	fmt.Println("The agent runs in the background as the \"DTP Certificate Discovery")
+	fmt.Println("Agent\" Windows service, and its icon in the notification area, by the")
+	fmt.Println("clock, shows what it is doing.")
+	if st := serviceState(); st != "" {
+		fmt.Println()
+		fmt.Printf("  service   %s\n", st)
+	}
+	fmt.Println()
+	fmt.Println("To enroll this machine, open PowerShell as an administrator and run:")
+	fmt.Println()
+	fmt.Printf("  & \"%s\" enroll --server https://YOUR-DTP --account YOUR-ACCOUNT-ID --token dtpd_...\n", exe)
+	fmt.Println()
+	fmt.Println("Every command:  dtp-agent.exe help")
 }
 
 func stateFlag(fs *flag.FlagSet) *string {
@@ -312,6 +372,20 @@ func cmdStatus(args []string) error {
 	dir := stateFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// LOOKING MUST NOT CREATE. Opening the state directory makes it if it is
+	// absent, and made from an unelevated prompt it would belong to whoever
+	// typed `status` — an empty folder the service later has to take back
+	// before it can trust it (see internal/state/trust_windows.go). A machine
+	// with no state yet is simply one that has never been enrolled.
+	if _, err := os.Stat(*dir); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("version   %s\nstate     %s (not created yet)\n", Version, *dir)
+		if st := serviceState(); st != "" {
+			fmt.Printf("service   %s\n", st)
+		}
+		fmt.Println("enrolled  no — run `dtp-agent enroll`")
+		return nil
 	}
 
 	store, err := state.Open(*dir)

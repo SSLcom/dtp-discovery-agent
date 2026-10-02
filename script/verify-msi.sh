@@ -94,6 +94,83 @@ control="$(rows ServiceControl)"
 }
 check "the service is controlled on install and uninstall" "$control" "$SERVICE_NAME"
 
+# THE NOTIFICATION-AREA ICON, and the three ways it is reached. Each is a row
+# wixl could drop or mangle while still reporting success, and the shortcut in
+# particular comes out ADVERTISED — targeting the feature, not the file — if it
+# is declared inside its <File>.
+check "the notification-area icon is in the package" "$(rows File)" "dtp-agent-tray.exe"
+
+shortcut="$(rows Shortcut)"
+check "a Start-menu shortcut is installed"          "$shortcut" "ProgramMenuFolder"
+check "the shortcut targets the icon's file itself" "$shortcut" "[INSTALLDIR]dtp-agent-tray.exe"
+
+check "the icon starts at every user's sign-in" "$(rows Registry)" 'CurrentVersion\Run'
+check "sign-in starts honour each user's opt-out" "$(rows Registry)" "--autostart"
+
+# EXACTLY TWO CUSTOM ACTIONS, both running the icon's own binary. Anything else
+# here would be the first thing in this package able to run arbitrary code at
+# uninstall, which is how a state directory gets deleted.
+actions="$(rows CustomAction)"
+names="$(printf '%s\n' "$actions" | cut -f1 | sort | tr '\n' ' ')"
+if [ "$names" = "LaunchTray StopTray " ]; then
+  echo "  ok    the only custom actions are LaunchTray and StopTray"
+else
+  echo "  FAIL  custom actions are: $names (want exactly LaunchTray StopTray)" >&2
+  fail=1
+fi
+# WHOLE ROWS, not only the type: the source file and the argument are what
+# decide what runs, as SYSTEM in StopTray's case.
+#   3154 = exe from an installed file (18) + ignore exit code (64)
+#        + deferred (1024) + not impersonated (2048): runs as SYSTEM, inside
+#        the transaction, where it can reach every session. Not async: the
+#        installer waits for it, so the files are free before they are touched.
+#    210 = exe from an installed file (18) + ignore (64) + async (128),
+#        immediate: runs as the person installing, after the transaction.
+for want in "StopTray	3154	dtp_agent_tray_exe	--stop-all" "LaunchTray	210	dtp_agent_tray_exe	--installed"; do
+  name="${want%%	*}"
+  got="$(printf '%s\n' "$actions" | awk -F'\t' -v n="$name" '$1==n {print $1"\t"$2"\t"$3"\t"$4}')"
+  if [ "$got" = "$want" ]; then
+    echo "  ok    $(printf '%s' "$want" | tr '\t' ' ')"
+  else
+    echo "  FAIL  $name is '$(printf '%s' "$got" | tr '\t' ' ')', want '$(printf '%s' "$want" | tr '\t' ' ')'" >&2
+    fail=1
+  fi
+done
+
+# THE ORDER, read off the built table, because wixl's After= is broken: it
+# appends the action at the end whatever it names. A deferred action after
+# InstallFinalize fails the whole install, on Windows, where nobody here sees it.
+seq="$(rows InstallExecuteSequence)"
+at() { printf '%s\n' "$seq" | awk -F'\t' -v n="$1" '$1==n {print $3}'; }
+init="$(at InstallInitialize)"; stop="$(at StopTray)"; removefiles="$(at RemoveFiles)"
+final="$(at InstallFinalize)"; launch="$(at LaunchTray)"
+if [ -n "$stop" ] && [ "$init" -lt "$stop" ] && [ "$stop" -lt "$removefiles" ]; then
+  echo "  ok    StopTray runs inside the transaction, before files are removed ($init < $stop < $removefiles)"
+else
+  echo "  FAIL  StopTray is at '${stop}'; it must sit between InstallInitialize ($init) and RemoveFiles ($removefiles)" >&2
+  fail=1
+fi
+# AND THE CONDITIONS, which are where a silently dropped attribute would turn
+# "only when there is an icon to stop" into "always", or "never on a silent
+# install" into "always" — launching an icon as SYSTEM in session 0.
+cond() { printf '%s\n' "$seq" | awk -F'\t' -v n="$1" '$1==n {print $2}'; }
+for want in "StopTray	?Tray=3" "LaunchTray	UILevel > 2 AND NOT REMOVE"; do
+  name="${want%%	*}"; c="$(cond "$name")"
+  if [ "$c" = "${want#*	}" ]; then
+    echo "  ok    $name runs only when: $c"
+  else
+    echo "  FAIL  $name's condition is '$c', want '${want#*	}'" >&2
+    fail=1
+  fi
+done
+
+if [ -n "$launch" ] && [ "$launch" -gt "$final" ]; then
+  echo "  ok    LaunchTray runs after the install has committed ($launch > $final)"
+else
+  echo "  FAIL  LaunchTray is at '${launch}'; it must come after InstallFinalize ($final)" >&2
+  fail=1
+fi
+
 # Removal must not reach the state directory: it holds the keypair DTP has
 # already approved, and deleting it would turn every reinstall in an estate into
 # a fresh round of approvals. The MSI leaves it alone by never naming it.

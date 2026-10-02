@@ -32,10 +32,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="dtp-agent-wixl:0.101"
 
 STAGE="build/stage/windows_amd64"
-[ -x "$ROOT/$STAGE/dtp-agent.exe" ] || {
-  echo "missing $STAGE/dtp-agent.exe — run build-release.sh first" >&2
-  exit 1
-}
+for exe in dtp-agent.exe dtp-agent-tray.exe; do
+  [ -x "$ROOT/$STAGE/$exe" ] || {
+    echo "missing $STAGE/$exe — run build-release.sh first" >&2
+    exit 1
+  }
+done
 
 # MSI has no concept of a prerelease: ProductVersion is up to three numeric
 # fields and anything else is rejected. The release's dry run builds `0.0.0-dev`,
@@ -68,6 +70,7 @@ docker run --rm -v "$ROOT":/work -w /work "$IMAGE" \
     -D Version="$MSI_VERSION" \
     -D ProductCode="$PRODUCT_CODE" \
     -D BinarySource="$STAGE/dtp-agent.exe" \
+    -D TraySource="$STAGE/dtp-agent-tray.exe" \
     -D LicenseSource="LICENSE" \
     -D ReadmeSource="README.md" \
     packaging/windows/dtp-agent.wxs

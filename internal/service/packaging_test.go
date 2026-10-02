@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -57,9 +58,50 @@ func TestPackagingMatchesTheServiceSpec(t *testing.T) {
 	// re-approval for every host in an estate. The MSI leaves it alone by never
 	// naming it — which is easy to undo by adding a RemoveFolder in a later
 	// change, so it is asserted here rather than left to a comment.
-	for _, forbidden := range []string{"<RemoveFolder", "<RemoveFile", "<CustomAction"} {
+	for _, forbidden := range []string{"<RemoveFolder", "<RemoveFile"} {
 		if strings.Contains(wxs, forbidden) {
 			t.Errorf("dtp-agent.wxs uses %s; uninstalling must not be able to reach the agent's keypair", forbidden)
 		}
 	}
+
+	// Custom actions are code the installer runs, so they are held to an
+	// exact list: the two that start and stop the notification-area icon, each
+	// running the icon's own binary with a fixed argument. A third — or either
+	// of these pointed at a shell — would be the first thing in this package
+	// able to run arbitrary code at uninstall, which is how a state directory
+	// gets deleted.
+	//
+	// Matched up to the tag's own ">", so the open-and-close spelling
+	// (<CustomAction ...></CustomAction>) is counted too — the self-closing-
+	// only pattern this replaced let a third action through, measured. An
+	// <?include?> could bring in actions this file never shows, so it is not
+	// allowed at all.
+	if strings.Contains(wxs, "<?include") {
+		t.Error("dtp-agent.wxs uses <?include?>, which could bring in custom actions this test cannot see")
+	}
+	actions := regexp.MustCompile(`<CustomAction\b([^>]*)>`).FindAllStringSubmatch(wxs, -1)
+	allowed := map[string]string{"StopTray": "--stop-all", "LaunchTray": "--installed"}
+	if len(actions) != len(allowed) {
+		t.Errorf("dtp-agent.wxs declares %d custom actions; only %d are allowed", len(actions), len(allowed))
+	}
+	for _, a := range actions {
+		attrs := strings.TrimSuffix(a[1], "/")
+		id := attr(attrs, "Id")
+		arg, ok := allowed[id]
+		if !ok {
+			t.Errorf("custom action %q is not one of the allowed ones", id)
+			continue
+		}
+		if attr(attrs, "FileKey") != "dtp_agent_tray_exe" || attr(attrs, "ExeCommand") != arg {
+			t.Errorf("custom action %s must run dtp-agent-tray.exe %s, and nothing else; it has %s", id, arg, strings.TrimSpace(attrs))
+		}
+	}
+}
+
+func attr(attrs, name string) string {
+	m := regexp.MustCompile(`\b` + name + `="([^"]*)"`).FindStringSubmatch(attrs)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }

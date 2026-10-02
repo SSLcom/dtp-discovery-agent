@@ -98,6 +98,12 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("state directory %s: %w", dir, err)
 	}
+	// WHOSE directory it is, before what its ACL says: an owner can always
+	// rewrite an ACL, so tightening one on a directory somebody else created
+	// protects nothing. See trust_windows.go.
+	if err := trustDir(dir); err != nil {
+		return nil, err
+	}
 	// MkdirAll does NOT change the mode of a directory that already exists, so
 	// a state directory a package or an operator created as 0755 would keep
 	// this agent's private key world-readable forever. Tightened on every open
@@ -125,7 +131,7 @@ func (s *Store) path(name string) string { return filepath.Join(s.dir, name) }
 func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	path := s.path("agent.key")
 
-	raw, err := os.ReadFile(path)
+	raw, err := readTrusted(path)
 	switch {
 	case err == nil:
 		// TIGHTENED ON EVERY LOAD, not only at creation. A key restored from a
@@ -157,11 +163,32 @@ func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	// umask can only clear bits, but an existing file's mode survives a write,
 	// so a key file left group-readable by an older version stays that way
 	// unless it is corrected here.
-	if err := os.WriteFile(path, encoded, keyPerm); err != nil {
+	//
+	// THROUGH A TEMP FILE AND A RENAME, like everything else here, so the key
+	// appears under its name only once it is whole AND owned as readTrusted
+	// requires. Written in place, a failure between the write and the change
+	// of owner would leave a key the next run refuses as planted — and since
+	// the key exists, it would never be generated again.
+	tmp, err := os.CreateTemp(s.dir, ".agent.key.*")
+	if err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := secure(path, keyPerm); err != nil {
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(encoded); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := secure(tmp.Name(), keyPerm); err != nil {
 		return nil, err
+	}
+	if err := adopt(tmp.Name()); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	return key, nil
 }
@@ -215,7 +242,7 @@ func Fingerprint(key *ecdsa.PrivateKey) (string, error) {
 // ── config ───────────────────────────────────────────────────────────────────
 
 func (s *Store) LoadConfig() (*Config, error) {
-	raw, err := os.ReadFile(s.path("config.json"))
+	raw, err := readTrusted(s.path("config.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotEnrolled
@@ -255,7 +282,7 @@ type LastRun struct {
 }
 
 func (s *Store) LoadLastRun() (*LastRun, error) {
-	raw, err := os.ReadFile(s.path("last-run.json"))
+	raw, err := readTrusted(s.path("last-run.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -301,6 +328,10 @@ func (s *Store) writeAtomic(name string, data []byte) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Before the rename, so the file is never in place under any other owner.
+	if err := adopt(tmp.Name()); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), s.path(name))
