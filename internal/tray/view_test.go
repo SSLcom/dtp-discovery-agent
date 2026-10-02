@@ -140,43 +140,115 @@ func TestTheTooltipFitsWhatWindowsShows(t *testing.T) {
 func TestEveryIconIsAValidImageOfTheAskedSize(t *testing.T) {
 	for _, h := range []Health{Good, Attention, Problem, Unknown} {
 		for _, size := range []int{16, 20, 24, 32, 48} {
-			img, err := png.Decode(bytes.NewReader(Icon(h, size)))
-			if err != nil {
-				t.Fatalf("health %d, %dpx: %v", h, size, err)
-			}
-			if b := img.Bounds(); b.Dx() != size || b.Dy() != size {
-				t.Errorf("health %d: %v, want %dx%d", h, b, size, size)
-			}
-			// The corners are outside the disc. An opaque corner means the icon
-			// would sit on the taskbar as a coloured square.
-			if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
-				t.Errorf("health %d, %dpx: the corner is not transparent", h, size)
+			for _, dark := range []bool{true, false} {
+				img, err := png.Decode(bytes.NewReader(Icon(h, size, dark)))
+				if err != nil {
+					t.Fatalf("health %d, %dpx: %v", h, size, err)
+				}
+				if b := img.Bounds(); b.Dx() != size || b.Dy() != size {
+					t.Errorf("health %d: %v, want %dx%d", h, b, size, size)
+				}
+				// Outside the mark and the badge. An opaque corner means the
+				// icon would sit on the taskbar as a coloured square.
+				for _, c := range [][2]int{{0, 0}, {size - 1, size - 1}} {
+					if _, _, _, a := img.At(c[0], c[1]).RGBA(); a != 0 {
+						t.Errorf("health %d, %dpx: corner %v is not transparent", h, size, c)
+					}
+				}
 			}
 		}
 	}
 }
 
-// Shape, not only colour: no two states may draw the same glyph.
+// Every state looks different from every other — including from the plain
+// mark, which is what "all is well" looks like.
 func TestEveryHealthLooksDifferent(t *testing.T) {
 	seen := map[string]Health{}
 	for _, h := range []Health{Good, Attention, Problem, Unknown} {
-		img, _ := png.Decode(bytes.NewReader(Icon(h, 16)))
-		var mask strings.Builder
-		for y := 0; y < 16; y++ {
-			for x := 0; x < 16; x++ {
+		key := string(Icon(h, 16, true))
+		if other, dup := seen[key]; dup {
+			t.Errorf("health %d draws the same icon as health %d", h, other)
+		}
+		seen[key] = h
+	}
+}
+
+// A healthy machine shows the plain mark: one ink, nothing else.
+func TestAllIsWellIsThePlainMark(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		img, _ := png.Decode(bytes.NewReader(Icon(Good, 32, dark)))
+		want := [3]uint32{0x19, 0x15, 0x21}
+		if dark {
+			want = [3]uint32{0xff, 0xff, 0xff}
+		}
+		inked := 0
+		for y := 0; y < 32; y++ {
+			for x := 0; x < 32; x++ {
 				r, g, b, a := img.At(x, y).RGBA()
-				// White-ish and opaque: the glyph.
-				if a > 0x8000 && r > 0xc000 && g > 0xc000 && b > 0xc000 {
-					mask.WriteByte('#')
-				} else {
-					mask.WriteByte('.')
+				if a < 0xffff {
+					continue // an edge pixel, partly transparent
+				}
+				inked++
+				if r>>8 != want[0] || g>>8 != want[1] || b>>8 != want[2] {
+					t.Fatalf("dark=%v: pixel (%d,%d) is %02x%02x%02x, not the mark's ink", dark, x, y, r>>8, g>>8, b>>8)
 				}
 			}
 		}
-		if other, dup := seen[mask.String()]; dup {
-			t.Errorf("health %d draws the same glyph as health %d", h, other)
+		if inked < 100 {
+			t.Errorf("dark=%v: only %d pixels of mark at 32 px", dark, inked)
 		}
-		seen[mask.String()] = h
+	}
+}
+
+// The brand ink would vanish on a dark taskbar — the Windows 11 default.
+func TestTheMarkFollowsTheTaskbar(t *testing.T) {
+	if bytes.Equal(Icon(Good, 16, true), Icon(Good, 16, false)) {
+		t.Error("the icon is the same on a dark taskbar and a light one")
+	}
+}
+
+// THE MARK IS DRAWN RIGHT. The pinwheel turns onto itself every quarter turn,
+// so a misread path command, a wrongly flattened curve or a broken fill rule
+// shows up as asymmetry — and its centre is an open square.
+func TestThePinwheelIsDrawnAsThePinwheel(t *testing.T) {
+	m := pinwheel()
+	if m.contains(0.5, 0.5) {
+		t.Error("the centre of the pinwheel is filled; the mark has an open square there")
+	}
+	const n = 200
+	inside, mismatch := 0, 0
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			x, y := (float64(i)+0.5)/n, (float64(j)+0.5)/n
+			a := m.contains(x, y)
+			// A quarter turn about the centre.
+			if a != m.contains(1-y, x) {
+				mismatch++
+			}
+			if a {
+				inside++
+			}
+		}
+	}
+	if frac := float64(inside) / (n * n); frac < 0.25 || frac > 0.6 {
+		t.Errorf("the mark covers %.0f%% of its square, which is not the pinwheel", frac*100)
+	}
+	// The published paths are hand-drawn to within a fraction of a unit, so
+	// allow the edges a little.
+	if frac := float64(mismatch) / float64(inside); frac > 0.04 {
+		t.Errorf("%.1f%% of the mark changes under a quarter turn; the pinwheel is symmetric", frac*100)
+	}
+}
+
+func TestTheMarkUsesOnlyWhatTheParserReads(t *testing.T) {
+	for _, d := range pinwheelPaths {
+		for _, c := range d {
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				if !strings.ContainsRune("MLHVCZ", c) {
+					t.Errorf("the mark uses path command %q, which parsePath does not read", c)
+				}
+			}
+		}
 	}
 }
 

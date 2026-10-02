@@ -14,12 +14,14 @@ import (
 func TestWindowsAcceptsEveryIconTheTrayDraws(t *testing.T) {
 	for _, h := range []tray.Health{tray.Good, tray.Attention, tray.Problem, tray.Unknown} {
 		for _, size := range []int{16, 20, 24, 32} {
-			icon := iconFromPNG(tray.Icon(h, size), size)
-			if icon == 0 {
-				t.Errorf("Windows rejected the health-%d icon at %d px", h, size)
-				continue
+			for _, dark := range []bool{true, false} {
+				icon := iconFromPNG(tray.Icon(h, size, dark), size)
+				if icon == 0 {
+					t.Errorf("Windows rejected the health-%d icon at %d px (dark taskbar %v)", h, size, dark)
+					continue
+				}
+				procDestroyIcon.Call(uintptr(icon))
 			}
-			procDestroyIcon.Call(uintptr(icon))
 		}
 	}
 }
