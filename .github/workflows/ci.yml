@@ -59,6 +59,11 @@ jobs:
       # It needs no Docker and no DTP: this repository cannot boot one, and the
       # server half is a test fixture that speaks the documented protocol.
       - run: go test -race ./...
+        env:
+          # The Windows runner is elevated, and the state directory's ownership
+          # tests need it to be: here, a test that would skip for want of
+          # elevation fails instead, so they cannot stop running unnoticed.
+          DTP_REQUIRE_ELEVATED: ${{ matrix.os == 'windows-latest' && '1' || '' }}
 
   # The release path, exercised on every change rather than only when a tag is
   # pushed. A release pipeline whose first real run is the release itself is one
@@ -448,6 +453,76 @@ jobs:
           if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\DTP Agent.lnk") { throw "the Start-menu shortcut outlived the uninstall" }
           if ((Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run').DTPAgentTray) { throw "the sign-in entry outlived the uninstall" }
           Write-Host "service, icon, shortcut and sign-in entry gone; keypair kept"
+
+  # THE UPGRADE EVERY EXISTING WINDOWS AGENT WILL TAKE: from the published
+  # v0.3.0, enrolled from an administrator prompt, to this build.
+  #
+  # Since Vista an elevated administrator's files are owned by that person's
+  # account, not by the Administrators group. This build judges the key and
+  # configuration by their owner before believing them, and a version that knew
+  # only the group would call every enrolled agent's key planted and stop the
+  # fleet reporting at the upgrade — found by Bugbot, invisible to every other
+  # test here, because all of them create their files with the new code.
+  windows-upgrade-from-release:
+    needs: release-path
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-ci
+          path: dist
+
+      - name: Install the published v0.3.0
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.3.0 --repo $env:GITHUB_REPOSITORY --pattern '*windows_amd64.msi' --dir old
+          $msi = (Get-ChildItem old\*.msi)[0].FullName
+          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","old.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content old.log -Tail 60; throw "installing v0.3.0 exited $($p.ExitCode)" }
+
+      # Enrolled the way the README says: from an elevated prompt. The server is
+      # unreachable, so enroll writes the key and stops; the configuration it
+      # would have saved is written here instead, from the same prompt, so both
+      # files are owned the way a real enrolment leaves them.
+      - name: Enroll it as an administrator would
+        shell: pwsh
+        run: |
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          & $exe enroll --server http://127.0.0.1:1 --account 00000000-0000-0000-0000-000000000000 2>&1 | Out-Null
+          $global:LASTEXITCODE = 0
+          $state = "$env:ProgramData\DTP\agent"
+          '{"server_url":"https://dtp.example.com","account_id":"00000000-0000-0000-0000-000000000000"}' |
+            Set-Content -NoNewline "$state\config.json"
+
+          # NOT A FORMALITY: if these were owned by the group already, this job
+          # would pass whatever the new code did with an administrator's files.
+          $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          foreach ($f in 'agent.key', 'config.json') {
+            $owner = (Get-Acl "$state\$f").Owner
+            Write-Host "$f owned by $owner"
+            if ($owner -ne $me) { throw "$f is owned by $owner, not by the administrator ($me) who wrote it — the case this job exists for is not set up" }
+          }
+          & $exe status | Out-File before.txt
+          Get-Content before.txt
+
+      - name: Upgrade to this build, and the agent keeps its identity
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
+          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","upgrade.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content upgrade.log -Tail 80; throw "the upgrade exited $($p.ExitCode)" }
+
+          $exe = "$env:ProgramFiles\SSL.com\DTP Agent\dtp-agent.exe"
+          $out = & $exe status 2>&1 | Out-String
+          Write-Host $out
+          if ($out -match 'planted') { throw "after the upgrade, the key an administrator enrolled is refused as planted" }
+          $before = (Select-String -Path before.txt -Pattern '^key\s+(\S+)').Matches.Groups[1].Value
+          if (-not $before) { throw "v0.3.0 reported no key before the upgrade, so this proves nothing" }
+          if ($out -notmatch "key\s+$before") { throw "the key after the upgrade is not the key from before it ($before)" }
+          if ($out -notmatch 'server\s+https://dtp.example.com') { throw "the configuration was not read after the upgrade" }
+          Write-Host "same key ($($before.Substring(0,16))…) and configuration after the upgrade"
 
   # The agent ships as one static binary per platform, and a member's host is
   # not this runner. Cross-compiling every target on every change is what stops

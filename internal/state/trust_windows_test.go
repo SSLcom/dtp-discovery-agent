@@ -81,14 +81,17 @@ func TestAJunctionInPlaceOfThePublicDirectoryIsReplacedNotFollowed(t *testing.T)
 // process can set this up — which is also the only kind that can take it back.
 func giveTo(t *testing.T, path string, which windows.WELL_KNOWN_SID_TYPE) {
 	t.Helper()
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("needs an elevated test process to make another account the owner")
-	}
-	if err := enablePrivileges("SeRestorePrivilege", "SeTakeOwnershipPrivilege"); err != nil {
-		t.Fatal(err)
-	}
 	sid, err := windows.CreateWellKnownSid(which)
 	if err != nil {
+		t.Fatal(err)
+	}
+	giveToSID(t, path, sid)
+}
+
+func giveToSID(t *testing.T, path string, sid *windows.SID) {
+	t.Helper()
+	needElevation(t, "to make another account the owner")
+	if err := enablePrivileges("SeRestorePrivilege", "SeTakeOwnershipPrivilege"); err != nil {
 		t.Fatal(err)
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
@@ -170,9 +173,7 @@ func TestAKeyAnotherAccountOwnsIsRefusedWhenRead(t *testing.T) {
 // — including as SYSTEM after an administrator enrolled, on a machine whose
 // policy makes the creator, not the Administrators group, the owner.
 func TestWhatAPrivilegedAgentWritesIsOwnedByTheAdministrators(t *testing.T) {
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("only a privileged process hands its files to the administrators")
-	}
+	needElevation(t, "because only a privileged process hands its files to the administrators")
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -192,4 +193,77 @@ func TestWhatAPrivilegedAgentWritesIsOwnedByTheAdministrators(t *testing.T) {
 			t.Errorf("%s is owned by %s; the service could refuse its own file", name, accountName(owner))
 		}
 	}
+}
+
+func currentUser(t *testing.T) *windows.SID {
+	t.Helper()
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.User.Sid
+}
+
+// THE UPGRADE BUGBOT FOUND. Since Vista, what an elevated administrator creates
+// is owned by that administrator's account, so this is the state of every v0.3
+// agent enrolled from an administrator prompt. Refusing it would stop a whole
+// fleet reporting at the upgrade, and the only recovery would cost each host
+// its approved identity.
+func TestAKeyOwnedByTheAdministratorWhoEnrolledIsStillTrusted(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.LoadOrCreateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(store.Dir(), "agent.key")
+	giveToSID(t, key, currentUser(t)) // as v0.3 left it
+	giveToSID(t, store.Dir(), currentUser(t))
+
+	reopened, err := Open(store.Dir())
+	if err != nil {
+		t.Fatalf("a directory an administrator enrolled was refused after the upgrade: %v", err)
+	}
+	loaded, err := reopened.LoadOrCreateKey()
+	if err != nil {
+		t.Fatalf("the key an administrator enrolled was refused after the upgrade: %v", err)
+	}
+	if !created.Equal(loaded) {
+		t.Fatal("a different key came back, so the approved identity was lost")
+	}
+	// And handed to the group, so the lookup is not repeated on every read.
+	for _, path := range []string{key, store.Dir()} {
+		if owner, _ := ownerOf(path); owner == nil || !isGroupOwned(owner) {
+			t.Errorf("%s was believed but not handed to the Administrators group", path)
+		}
+	}
+}
+
+func TestAdministratorsAreToldApartFromEveryoneElse(t *testing.T) {
+	needElevation(t, "to have an administrator to look up")
+	if !isAdministrator(currentUser(t)) {
+		t.Error("the administrator running this test was not recognised as one")
+	}
+	for _, which := range []windows.WELL_KNOWN_SID_TYPE{windows.WinBuiltinUsersSid, windows.WinWorldSid, windows.WinAuthenticatedUserSid} {
+		if sid, _ := windows.CreateWellKnownSid(which); isAdministrator(sid) {
+			t.Errorf("%s was taken for an administrator", sid)
+		}
+	}
+}
+
+// needElevation skips a test that only an elevated process can run — and FAILS
+// it instead where CI says the runner is elevated (DTP_REQUIRE_ELEVATED), so
+// the tests that matter most here cannot quietly stop running and still read
+// as green.
+func needElevation(t *testing.T, why string) {
+	t.Helper()
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return
+	}
+	if os.Getenv("DTP_REQUIRE_ELEVATED") != "" {
+		t.Fatalf("needs an elevated test process %s, and this runner is meant to be elevated", why)
+	}
+	t.Skipf("needs an elevated test process %s", why)
 }

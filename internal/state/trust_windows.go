@@ -74,6 +74,12 @@ func trustDir(dir string) error {
 		return err
 	}
 	if trustedOwner(owner) {
+		// An administrator's own account — every v0.3 directory enrolled from
+		// an elevated prompt. Believed, and handed to the group so the next
+		// open does not have to look that account's groups up again.
+		if privileged && !isGroupOwned(owner) {
+			_ = setOwnerAdmins(dir)
+		}
 		return nil
 	}
 
@@ -106,18 +112,22 @@ func claim(path string) error {
 	if trustedOwner(owner) {
 		return nil
 	}
+	if err := setOwnerAdmins(path); err != nil {
+		return fmt.Errorf("taking ownership of %s from %s: %w", path, accountName(owner), err)
+	}
+	return nil
+}
+
+func setOwnerAdmins(path string) error {
 	if err := enablePrivileges("SeTakeOwnershipPrivilege", "SeRestorePrivilege"); err != nil {
-		return fmt.Errorf("taking ownership of %s: %w", path, err)
+		return err
 	}
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
-		return fmt.Errorf("taking ownership of %s from %s: %w", path, accountName(owner), err)
-	}
-	return nil
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil)
 }
 
 // refuseReparse fails if the path is a junction, a symlink, or any other
@@ -161,6 +171,17 @@ func ownerOf(path string) (*windows.SID, error) {
 // trustedInstaller is the service SID Windows itself installs files as.
 const trustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 
+// trustedOwner reports whether an owner is one the agent may believe: SYSTEM,
+// TrustedInstaller, the Administrators group — or ANY ACCOUNT THAT IS AN
+// ADMINISTRATOR.
+//
+// THE LAST CLAUSE IS NOT A CONVENIENCE. Since Vista, what an elevated
+// administrator creates is owned by that administrator's own account, not by
+// the group, unless a policy says otherwise. So every v0.3 agent enrolled from
+// an administrator prompt has a key owned by a person, and an owner check that
+// knew only the group SID would call every one of them planted and stop the
+// whole fleet reporting at the upgrade. What the planted-key attack needs is a
+// file a STANDARD user wrote; an administrator could replace the key anyway.
 func trustedOwner(sid *windows.SID) bool {
 	for _, which := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
 		if w, err := windows.CreateWellKnownSid(which); err == nil && sid.Equals(w) {
@@ -169,6 +190,66 @@ func trustedOwner(sid *windows.SID) bool {
 	}
 	if ti, err := windows.StringToSid(trustedInstaller); err == nil && sid.Equals(ti) {
 		return true
+	}
+	return isAdministrator(sid)
+}
+
+var (
+	authz                              = windows.NewLazySystemDLL("authz.dll")
+	procAuthzInitializeResourceManager = authz.NewProc("AuthzInitializeResourceManager")
+	procAuthzInitializeContextFromSid  = authz.NewProc("AuthzInitializeContextFromSid")
+	procAuthzGetInformationFromContext = authz.NewProc("AuthzGetInformationFromContext")
+	procAuthzFreeContext               = authz.NewProc("AuthzFreeContext")
+	procAuthzFreeResourceManager       = authz.NewProc("AuthzFreeResourceManager")
+)
+
+// isAdministrator asks Windows whether an account is a member of the local
+// Administrators group, directly or through any nesting of groups — the AuthZ
+// API computes the account's full group list the way a logon would, which a
+// walk of the group's direct members would not (domain and Entra groups are
+// how most estates grant admin).
+//
+// FAILS CLOSED. An account whose groups cannot be computed — a domain account
+// with no domain controller in reach — is not believed, and the agent says so.
+// That costs a report until the controller is back, once: a file that passes
+// is handed to the Administrators group, and the group needs no lookup.
+func isAdministrator(sid *windows.SID) bool {
+	const (
+		authzRMFlagNoAudit       = 0x1
+		authzContextInfoGroupSid = 2
+	)
+	var rm windows.Handle
+	if r, _, _ := procAuthzInitializeResourceManager.Call(authzRMFlagNoAudit, 0, 0, 0, 0, uintptr(unsafe.Pointer(&rm))); r == 0 {
+		return false
+	}
+	defer procAuthzFreeResourceManager.Call(uintptr(rm))
+
+	var ctx windows.Handle
+	var none windows.LUID
+	if r, _, _ := procAuthzInitializeContextFromSid.Call(0, uintptr(unsafe.Pointer(sid)), uintptr(rm), 0,
+		uintptr(*(*uint64)(unsafe.Pointer(&none))), 0, uintptr(unsafe.Pointer(&ctx))); r == 0 {
+		return false
+	}
+	defer procAuthzFreeContext.Call(uintptr(ctx))
+
+	var size uint32
+	procAuthzGetInformationFromContext.Call(uintptr(ctx), authzContextInfoGroupSid, 0, uintptr(unsafe.Pointer(&size)), 0)
+	if size == 0 {
+		return false
+	}
+	buf := make([]byte, size)
+	if r, _, _ := procAuthzGetInformationFromContext.Call(uintptr(ctx), authzContextInfoGroupSid, uintptr(size),
+		uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&buf[0]))); r == 0 {
+		return false
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false
+	}
+	for _, g := range (*windows.Tokengroups)(unsafe.Pointer(&buf[0])).AllGroups() {
+		if g.Sid.Equals(admins) {
+			return true
+		}
 	}
 	return false
 }
@@ -239,7 +320,27 @@ func readTrusted(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s belongs to %s, not to an administrator — it may have been planted, and will not be used. "+
 			"Delete %s and enroll again from an administrator prompt", path, accountName(owner), filepath.Dir(path))
 	}
-	return io.ReadAll(f)
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	// Believed, so handed to the group: a key owned by the administrator who
+	// enrolled needs that person's group memberships looked up on every read
+	// until it is, and a domain account's lookup can fail. Best effort.
+	if windows.GetCurrentProcessToken().IsElevated() && !isGroupOwned(owner) {
+		_ = setOwnerAdmins(path)
+	}
+	return raw, nil
+}
+
+func isGroupOwned(owner *windows.SID) bool {
+	for _, which := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		if w, err := windows.CreateWellKnownSid(which); err == nil && owner.Equals(w) {
+			return true
+		}
+	}
+	ti, err := windows.StringToSid(trustedInstaller)
+	return err == nil && owner.Equals(ti)
 }
 
 // acceptableOwner: an administrator, SYSTEM or TrustedInstaller for a
@@ -265,5 +366,5 @@ func adopt(path string) error {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return nil
 	}
-	return claim(path)
+	return setOwnerAdmins(path)
 }
