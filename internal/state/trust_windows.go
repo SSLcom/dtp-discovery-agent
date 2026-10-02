@@ -5,6 +5,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,11 @@ import (
 //     Administrators group — ONLY IF IT HOLDS NOTHING THE AGENT WOULD TRUST: a
 //     key or a configuration found there cannot be told from a planted one, so
 //     it is refused, with the sentence that says what to do.
+//
+// THAT LAST CHECK ONLY NARROWS THE HOLE. Its owner can still write into the
+// directory between the check and the claim, or later through a handle opened
+// earlier. What closes it is readTrusted, below: every file the agent believes
+// is judged by its own owner at the moment it is read.
 //
 // An unprivileged process cannot take anything back and has nothing to
 // protect: a directory it owns is its own (a test, or `--state` pointing
@@ -200,4 +206,64 @@ func enablePrivileges(names ...string) error {
 		_ = windows.AdjustTokenPrivileges(token, false, &tp, uint32(unsafe.Sizeof(tp)), nil, nil)
 	}
 	return nil
+}
+
+// readTrusted reads a file the agent will BELIEVE — its key, its
+// configuration, its memory of the last run — and refuses one that an
+// untrusted account owns.
+//
+// THIS IS WHAT ACTUALLY CLOSES THE PLANTED-KEY HOLE; trustDir only narrows it.
+// A user who created the directory can write into it right up to the moment
+// it is taken back, and through a handle opened before then, even after — so
+// no check of the directory, at any one moment, can promise what it will hold
+// when the key is read. The file's own owner can: whoever creates a file owns
+// it, and a privileged writer here always hands what it writes to the
+// administrators (see adopt). The owner is read through the same handle the
+// bytes come from, so the file that was checked is the file that is read.
+func readTrusted(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("reading the owner of %s: %w", path, err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, fmt.Errorf("reading the owner of %s: %w", path, err)
+	}
+	if !acceptableOwner(owner) {
+		return nil, fmt.Errorf("%s belongs to %s, not to an administrator — it may have been planted, and will not be used. "+
+			"Delete %s and enroll again from an administrator prompt", path, accountName(owner), filepath.Dir(path))
+	}
+	return io.ReadAll(f)
+}
+
+// acceptableOwner: an administrator, SYSTEM or TrustedInstaller for a
+// privileged process; for an unprivileged one, also itself — its own files in
+// its own directory, which is all it can reach.
+func acceptableOwner(owner *windows.SID) bool {
+	if trustedOwner(owner) {
+		return true
+	}
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return false
+	}
+	self, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && owner.Equals(self.User.Sid)
+}
+
+// adopt makes the administrators the owner of a file a privileged process has
+// just written. Without it, a machine whose policy makes the CREATOR the owner
+// of what an administrator creates would leave the key owned by whichever
+// admin enrolled — and the service, reading it as SYSTEM, would refuse its own
+// key.
+func adopt(path string) error {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return nil
+	}
+	return claim(path)
 }

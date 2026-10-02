@@ -131,7 +131,7 @@ func (s *Store) path(name string) string { return filepath.Join(s.dir, name) }
 func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	path := s.path("agent.key")
 
-	raw, err := os.ReadFile(path)
+	raw, err := readTrusted(path)
 	switch {
 	case err == nil:
 		// TIGHTENED ON EVERY LOAD, not only at creation. A key restored from a
@@ -165,6 +165,9 @@ func (s *Store) LoadOrCreateKey() (*ecdsa.PrivateKey, error) {
 	// unless it is corrected here.
 	if err := os.WriteFile(path, encoded, keyPerm); err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := adopt(path); err != nil {
+		return nil, err
 	}
 	if err := secure(path, keyPerm); err != nil {
 		return nil, err
@@ -221,7 +224,7 @@ func Fingerprint(key *ecdsa.PrivateKey) (string, error) {
 // ── config ───────────────────────────────────────────────────────────────────
 
 func (s *Store) LoadConfig() (*Config, error) {
-	raw, err := os.ReadFile(s.path("config.json"))
+	raw, err := readTrusted(s.path("config.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotEnrolled
@@ -261,7 +264,7 @@ type LastRun struct {
 }
 
 func (s *Store) LoadLastRun() (*LastRun, error) {
-	raw, err := os.ReadFile(s.path("last-run.json"))
+	raw, err := readTrusted(s.path("last-run.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -307,6 +310,10 @@ func (s *Store) writeAtomic(name string, data []byte) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Before the rename, so the file is never in place under any other owner.
+	if err := adopt(tmp.Name()); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), s.path(name))

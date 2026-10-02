@@ -139,3 +139,57 @@ func TestAnEmptyDirectoryAnotherUserCreatedIsTakenBack(t *testing.T) {
 		t.Errorf("the directory is still owned by %s", accountName(owner))
 	}
 }
+
+// THE RACE BUGBOT FOUND. A user who created the directory can still drop a key
+// into it after the directory check has passed — so the key is judged by its
+// OWN owner when it is read, whatever the directory looked like earlier. This
+// plants it inside a directory the agent already trusts: the state the race
+// leaves behind.
+func TestAKeyAnotherAccountOwnsIsRefusedWhenRead(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"agent.key", "config.json"} {
+		path := filepath.Join(store.Dir(), name)
+		if err := os.WriteFile(path, []byte("planted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		giveTo(t, path, windows.WinBuiltinUsersSid)
+	}
+
+	if _, err := store.LoadOrCreateKey(); err == nil || !strings.Contains(err.Error(), "may have been planted") {
+		t.Errorf("a key another account owns was used: %v", err)
+	}
+	if _, err := store.LoadConfig(); err == nil || !strings.Contains(err.Error(), "may have been planted") {
+		t.Errorf("a configuration another account owns was used: %v", err)
+	}
+}
+
+// The other half: what the agent writes itself, it must still be able to read
+// — including as SYSTEM after an administrator enrolled, on a machine whose
+// policy makes the creator, not the Administrators group, the owner.
+func TestWhatAPrivilegedAgentWritesIsOwnedByTheAdministrators(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("only a privileged process hands its files to the administrators")
+	}
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadOrCreateKey(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveConfig(&Config{ServerURL: "https://x", AccountID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"agent.key", "config.json"} {
+		owner, err := ownerOf(filepath.Join(store.Dir(), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !trustedOwner(owner) {
+			t.Errorf("%s is owned by %s; the service could refuse its own file", name, accountName(owner))
+		}
+	}
+}
