@@ -257,7 +257,7 @@ jobs:
             $path = "$env:ProgramFiles\SSL.com\DTP Agent\$exe"
             $icons = [W.Shell]::ExtractIconEx($path, -1, $null, $null, 0)
             $info = (Get-Item $path).VersionInfo
-            Write-Host "$exe: $icons icon(s); $($info.CompanyName) / $($info.ProductName) / $($info.FileVersion)"
+            Write-Host "${exe}: $icons icon(s); $($info.CompanyName) / $($info.ProductName) / $($info.FileVersion)"
             if ($icons -lt 1) { throw "$exe carries no icon" }
             if ($info.CompanyName -ne 'SSL.com') { throw "$exe carries no version information (CompanyName '$($info.CompanyName)')" }
           }
