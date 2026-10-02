@@ -175,13 +175,15 @@ const trustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-22
 // TrustedInstaller, the Administrators group — or ANY ACCOUNT THAT IS AN
 // ADMINISTRATOR.
 //
-// THE LAST CLAUSE IS NOT A CONVENIENCE. Since Vista, what an elevated
-// administrator creates is owned by that administrator's own account, not by
-// the group, unless a policy says otherwise. So every v0.3 agent enrolled from
-// an administrator prompt has a key owned by a person, and an owner check that
-// knew only the group SID would call every one of them planted and stop the
-// whole fleet reporting at the upgrade. What the planted-key attack needs is a
-// file a STANDARD user wrote; an administrator could replace the key anyway.
+// THE LAST CLAUSE IS NOT A CONVENIENCE. Who owns what an administrator
+// creates depends on a security policy ("Default owner for objects created by
+// members of the Administrators group"), which varies by edition and estate —
+// measured on a GitHub Windows Server runner, it is the group. Where it is
+// "Object creator", and wherever an administrator enrolled v0.3 from an
+// UNELEVATED prompt (which v0.3 allowed), the key is owned by a person, and an
+// owner check that knew only the group SID would call it planted and stop
+// those agents reporting at the upgrade. What the planted-key attack needs is
+// a file a STANDARD user wrote; an administrator could replace the key anyway.
 func trustedOwner(sid *windows.SID) bool {
 	for _, which := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
 		if w, err := windows.CreateWellKnownSid(which); err == nil && sid.Equals(w) {

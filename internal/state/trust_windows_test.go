@@ -204,11 +204,11 @@ func currentUser(t *testing.T) *windows.SID {
 	return u.User.Sid
 }
 
-// THE UPGRADE BUGBOT FOUND. Since Vista, what an elevated administrator creates
-// is owned by that administrator's account, so this is the state of every v0.3
-// agent enrolled from an administrator prompt. Refusing it would stop a whole
-// fleet reporting at the upgrade, and the only recovery would cost each host
-// its approved identity.
+// THE UPGRADE BUGBOT FOUND. A v0.3 agent whose key is owned by the
+// administrator who enrolled it — where policy makes the creator the owner, or
+// wherever they enrolled from an unelevated prompt. Refusing it would stop
+// those agents reporting at the upgrade, and the only recovery would cost each
+// host its approved identity.
 func TestAKeyOwnedByTheAdministratorWhoEnrolledIsStillTrusted(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

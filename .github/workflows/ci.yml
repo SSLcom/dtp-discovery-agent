@@ -457,12 +457,15 @@ jobs:
   # THE UPGRADE EVERY EXISTING WINDOWS AGENT WILL TAKE: from the published
   # v0.3.0, enrolled from an administrator prompt, to this build.
   #
-  # Since Vista an elevated administrator's files are owned by that person's
-  # account, not by the Administrators group. This build judges the key and
-  # configuration by their owner before believing them, and a version that knew
-  # only the group would call every enrolled agent's key planted and stop the
-  # fleet reporting at the upgrade — found by Bugbot, invisible to every other
-  # test here, because all of them create their files with the new code.
+  # This build judges the key and configuration by their OWNER before believing
+  # them. On this runner an elevated administrator's files belong to the
+  # Administrators group (measured), but where policy makes the creator the
+  # owner, or wherever v0.3 was enrolled from an unelevated prompt, they belong
+  # to the administrator's own account — and a version that knew only the group
+  # would call those keys planted and stop the agents reporting at the upgrade.
+  # Found by Bugbot, invisible to every other test here, because all of them
+  # create their files with the new code. The job sets that ownership itself,
+  # because this runner's policy would not produce it.
   windows-upgrade-from-release:
     needs: release-path
     runs-on: windows-latest
@@ -496,9 +499,17 @@ jobs:
           '{"server_url":"https://dtp.example.com","account_id":"00000000-0000-0000-0000-000000000000"}' |
             Set-Content -NoNewline "$state\config.json"
 
-          # NOT A FORMALITY: if these were owned by the group already, this job
-          # would pass whatever the new code did with an administrator's files.
+          # Owned by the administrator's own account, as "Object creator"
+          # policy or an unelevated v0.3 enrolment leaves them. This runner's
+          # policy gives them to the group, so it is set here — and then
+          # checked, because if they were the group's this job would pass
+          # whatever the new code did with an administrator's files.
           $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          foreach ($path in @($state, "$state\agent.key", "$state\config.json")) {
+            icacls $path /setowner $me | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "could not make $me the owner of $path" }
+          }
+          $global:LASTEXITCODE = 0
           foreach ($f in 'agent.key', 'config.json') {
             $owner = (Get-Acl "$state\$f").Owner
             Write-Host "$f owned by $owner"
