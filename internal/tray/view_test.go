@@ -179,3 +179,25 @@ func TestEveryHealthLooksDifferent(t *testing.T) {
 		seen[mask.String()] = h
 	}
 }
+
+func TestAWedgedScanIsNotShownAsHealthy(t *testing.T) {
+	st := status(state.PhaseScanning)
+	st.UpdatedAt = now.Add(-StaleAfter - time.Minute).Format(time.RFC3339)
+	v := Describe(ServiceRunning, st, nil, now)
+	if v.Health != Attention || !strings.Contains(strings.Join(v.Details, " "), "not updated since") {
+		t.Errorf("a scan that has said nothing for hours is shown as %+v", v)
+	}
+
+	st.UpdatedAt = now.Add(-time.Minute).Format(time.RFC3339)
+	if v := Describe(ServiceRunning, st, nil, now); v.Health != Good {
+		t.Errorf("a scan that started a minute ago is shown as %+v", v)
+	}
+}
+
+func TestAnEnrollmentPollThatStoppedIsCalledOut(t *testing.T) {
+	st := status(state.PhaseNotEnrolled)
+	st.UpdatedAt = now.Add(-15 * time.Minute).Format(time.RFC3339)
+	if v := Describe(ServiceRunning, st, nil, now); !strings.Contains(strings.Join(v.Details, " "), "not updated since") {
+		t.Errorf("the minute-by-minute poll has been silent for 15 minutes and nothing says so: %+v", v)
+	}
+}

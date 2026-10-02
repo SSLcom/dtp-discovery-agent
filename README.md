@@ -367,14 +367,27 @@ the next sign-in instead.
 closed to everyone but SYSTEM and the administrators, and under UAC even an
 administrator's icon runs without that access. So the service publishes a short
 summary for it at `%ProgramData%\DTP\agent\public\status.json`: what it is
-doing, when it last reported, how many certificates it found, the last error,
-and the DTP address it reports to. No key, no account id, no agent id and no
+doing, when it last reported, how many certificates it found, a one-line
+*category* of the last error (never the server's own words, which go only to the
+administrator's `status` and the log), and the DTP address it reports to,
+without any credentials or query string. No key, no account id, no agent id and no
 fingerprint. Users can read that one file and cannot change it. It sits inside
 the protected directory so that nobody can create it first or redirect it.
 
 **Double-clicking `dtp-agent.exe`** opens a window that explains where the agent
 is, shows whether the service is running, and gives the enrollment line. Then it
-waits for Enter. Run from a prompt, it behaves exactly as it always has.
+waits for Enter. `status` does the same when it has a window of its own (which is
+how the icon opens it). No other command ever waits, because a scheduled task
+can look exactly like a double-click and must not hang. Run from a prompt,
+everything behaves exactly as it always has.
+
+**The state directory has to belong to an administrator.** Any local user can
+create folders under `%ProgramData%`, and whoever creates one owns it. So a
+`DTP\agent` folder made before the install could hold a key its creator kept a
+copy of. The service takes back an *empty* folder like that. A folder someone
+else created that already holds a key or a configuration is refused, with a
+message saying so: delete it and enroll again from an administrator prompt. The
+agent also refuses to follow a junction or link in place of either folder.
 
 **Windows on ARM has no installer.** wixl, which is what lets the MSI be built
 on Linux alongside everything else, cannot emit an arm64 package. The arm64 zip

@@ -51,6 +51,16 @@ const (
 // person looking at the icon learns about it the same day.
 const StaleAfter = 3 * time.Hour
 
+// heartbeat is how long each phase may go unwritten before the icon calls it
+// stuck: generous multiples of how often the service rewrites it. Pending is
+// rewritten on every retry, at whatever interval the server asks for.
+var heartbeat = map[string]time.Duration{
+	state.PhaseNotEnrolled: 10 * time.Minute,
+	state.PhasePending:     30 * time.Minute,
+	state.PhaseScheduled:   StaleAfter,
+	state.PhaseScanning:    StaleAfter,
+}
+
 // View is everything the icon shows.
 type View struct {
 	Health   Health
@@ -169,6 +179,20 @@ func Describe(svc Service, st *state.PublicStatus, readErr error, now time.Time)
 		// A newer service than this icon. Say what it said rather than guess.
 		v.Health = Unknown
 		v.Headline = "Agent status: " + st.Phase
+	}
+
+	// A STATUS THAT HAS STOPPED MOVING. Every phase but "reporting" (judged by
+	// its last report, above) is rewritten while it lasts — the enrollment
+	// poll every minute, a pending approval on every retry — so one that has
+	// not been touched in far longer than that is a service that is running
+	// but wedged, and "Scanning this machine" in green forever would hide it.
+	if limit, ok := heartbeat[st.Phase]; ok && svc == ServiceRunning {
+		if t, ok := parseTime(st.UpdatedAt); ok && now.Sub(t) > limit {
+			if v.Health < Attention {
+				v.Health = Attention
+			}
+			v.Details = append(v.Details, "Status not updated since "+when(t, now)+".")
+		}
 	}
 
 	if svc != ServiceRunning && svc != ServiceStarting && v.Health < Attention {

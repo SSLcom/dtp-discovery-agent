@@ -74,6 +74,12 @@ func runService(dir string) error {
 type handler struct {
 	dir string
 	log *service.Log
+
+	// The last publishing failure logged, so a failure that repeats every
+	// minute is written once rather than interleaved with the enrollment
+	// poll's own line — which defeats the log's repeat-collapsing and fills
+	// it in days.
+	lastPublishErr string
 }
 
 func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
@@ -155,7 +161,7 @@ func (h *handler) enrolled() bool {
 	if err != nil {
 		// Published at every poll, not once: the file's timestamp moving is
 		// how the icon can tell a waiting service from a wedged one.
-		h.publish(state.PhaseNotEnrolled, "")
+		h.publish(state.PhaseNotEnrolled, nil)
 		return false
 	}
 	return true
@@ -168,18 +174,13 @@ func (h *handler) scan(ctx context.Context) error {
 	out := reporter{
 		info:  h.log.Printf,
 		warn:  h.log.Printf,
-		phase: func(phase string) { h.publish(phase, "") },
+		phase: func(phase string) { h.publish(phase, nil) },
 	}
 	err := reportOnce(ctx, h.dir, nil, nil, false, out)
-	switch {
-	case ctx.Err() != nil:
-		// Stopping. The service manager will say "stopped" to anyone who asks,
-		// and the last real outcome is more use to them than "interrupted".
+	if phase, cause, resting := outcome(ctx.Err(), err); resting {
 		h.publishResting()
-	case err != nil:
-		h.publish(state.PhaseFailed, err.Error())
-	default:
-		h.publish(state.PhaseReporting, "")
+	} else {
+		h.publish(phase, cause)
 	}
 	return err
 }
@@ -193,17 +194,20 @@ func (h *handler) publishResting() {
 		return
 	}
 	if _, err := store.LoadConfig(); err != nil {
-		h.publish(state.PhaseNotEnrolled, "")
+		h.publish(state.PhaseNotEnrolled, nil)
 		return
 	}
 	last, _ := store.LoadLastRun()
 	switch {
 	case last == nil:
-		h.publish(state.PhaseScheduled, "")
+		h.publish(state.PhaseScheduled, nil)
 	case last.Error != "":
-		h.publish(state.PhaseFailed, last.Error)
+		// Only the text survives on disk, not the error's type, so this can
+		// only ever classify as the generic failure — which is the point:
+		// publicError never repeats text it did not write itself.
+		h.publish(state.PhaseFailed, errors.New(last.Error))
 	default:
-		h.publish(state.PhaseReporting, "")
+		h.publish(state.PhaseReporting, nil)
 	}
 }
 
@@ -213,21 +217,36 @@ func (h *handler) publishResting() {
 // looking at the machine; the inventory is the product. A failure here is
 // logged and the cycle carries on — a host that stopped reporting because it
 // could not update an icon would be the wrong way round.
-func (h *handler) publish(phase, lastError string) {
+//
+// THE ERROR GOES THROUGH publicError AND NOWHERE ELSE. This file is readable by
+// every user of the machine; see publicerror.go for what that rules out.
+func (h *handler) publish(phase string, cause error) {
 	store, err := state.Open(h.dir)
 	if err != nil {
-		h.log.Printf("publishing status: %v", err)
+		h.publishFailed(err)
 		return
 	}
-	st := &state.PublicStatus{Version: Version, Phase: phase, LastError: lastError}
+	st := &state.PublicStatus{Version: Version, Phase: phase, LastError: publicError(cause)}
 	if cfg, err := store.LoadConfig(); err == nil {
-		st.ServerURL = cfg.ServerURL
+		st.ServerURL = publicServerURL(cfg.ServerURL)
 	}
 	if last, err := store.LoadLastRun(); err == nil && last != nil {
 		st.LastRunAt = last.FinishedAt
 		st.Observed, st.Recorded, st.Rejected = last.Observed, last.Recorded, last.Rejected
 	}
 	if err := store.WritePublicStatus(st); err != nil {
-		h.log.Printf("publishing status: %v", err)
+		h.publishFailed(err)
+		return
+	}
+	if h.lastPublishErr != "" {
+		h.log.Printf("publishing status works again")
+		h.lastPublishErr = ""
+	}
+}
+
+func (h *handler) publishFailed(err error) {
+	if msg := err.Error(); msg != h.lastPublishErr {
+		h.log.Printf("publishing status for the notification-area icon: %v", err)
+		h.lastPublishErr = msg
 	}
 }

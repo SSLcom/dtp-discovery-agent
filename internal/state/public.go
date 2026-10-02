@@ -80,6 +80,16 @@ func PublicStatusPath(stateDir string) string {
 // already closed the parent directory around it.
 func (s *Store) WritePublicStatus(st *PublicStatus) error {
 	dir := filepath.Join(s.dir, publicDirName)
+	// A junction here would have SYSTEM write the file, and set the ACL below,
+	// wherever it pointed. Only an administrator could have made one inside a
+	// directory trustDir accepted — but the cost of not following it is one
+	// rmdir, and the cost of following it is the ACL of an arbitrary folder.
+	// os.Remove on a junction removes the link, never what it points at.
+	if isReparse(dir) {
+		if err := os.Remove(dir); err != nil {
+			return fmt.Errorf("public status directory %s is a link and could not be removed: %w", dir, err)
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("public status directory %s: %w", dir, err)
 	}
@@ -99,10 +109,23 @@ func (s *Store) WritePublicStatus(st *PublicStatus) error {
 	}
 	raw = append(raw, '\n')
 
+	// Temp files a stop interrupted between create and rename would otherwise
+	// collect here for ever, one per unlucky shutdown.
+	if stale, _ := filepath.Glob(filepath.Join(dir, ".status.json.*")); len(stale) > 0 {
+		for _, f := range stale {
+			if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > time.Minute {
+				_ = os.Remove(f)
+			}
+		}
+	}
+
 	tmp, err := os.CreateTemp(dir, ".status.json.*")
 	if err != nil {
 		return err
 	}
+	// CreateTemp makes it 0600; this file exists to be read by others. On
+	// Windows the mode is meaningless and the directory's ACL decides.
+	_ = tmp.Chmod(0o644)
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(raw); err != nil {
 		tmp.Close()
@@ -119,6 +142,12 @@ func (s *Store) WritePublicStatus(st *PublicStatus) error {
 	if err := os.Rename(tmp.Name(), dest); err != nil {
 		time.Sleep(100 * time.Millisecond)
 		if err := os.Rename(tmp.Name(), dest); err != nil {
+			// The cause alone, not the LinkError: that names the random temp
+			// file, so two identical failures would never read as a repeat.
+			var le *os.LinkError
+			if errors.As(err, &le) {
+				err = le.Err
+			}
 			return fmt.Errorf("publishing %s: %w", dest, err)
 		}
 	}

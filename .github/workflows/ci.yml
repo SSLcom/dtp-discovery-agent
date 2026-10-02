@@ -106,6 +106,12 @@ jobs:
       - name: Windows installer
         run: script/build-msi.sh 0.0.0-ci
 
+      # A SECOND VERSION, for the upgrade the Windows job runs. Every upgrade
+      # runs the OLD package's StopTray before the new files land, so what this
+      # release does there is what every later release inherits.
+      - name: A later installer, to upgrade to
+        run: script/build-msi.sh 0.0.1-ci
+
       # The installer's REFUSALS are the part worth testing. One that verifies
       # on the happy path and waves everything else through has the security
       # properties of one that does not verify at all.
@@ -158,7 +164,7 @@ jobs:
       - name: Install
         shell: pwsh
         run: |
-          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $msi = (Resolve-Path dist\dtp-agent_0.0.0-ci_windows_amd64.msi).Path
           Write-Host "installing $msi"
           $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","install.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) {
@@ -298,6 +304,17 @@ jobs:
           if ($sw.Elapsed.TotalSeconds -gt 10) { throw "from a prompt the agent waited for a key press" }
           $global:LASTEXITCODE = 0
 
+          # The other half, and the one that hangs a schedule if it breaks: a
+          # command a scheduled task would run, given a console of its own just
+          # as the double-click above was, must finish without anyone there.
+          foreach ($cmd in @('version', 'run --once')) {
+            $q = Start-Process $exe -ArgumentList $cmd -PassThru
+            if (-not $q.WaitForExit(30000)) {
+              Stop-Process -Id $q.Id
+              throw "'dtp-agent $cmd' on a console of its own waited for a key press; a scheduled task running it would never end"
+            }
+          }
+
       # Stopping must be prompt. The Service Control Manager kills a service
       # that stops answering while it shuts down, and what the administrator
       # sees is an error about the agent rather than a scan closing its
@@ -348,6 +365,31 @@ jobs:
 
           $global:LASTEXITCODE = 0
 
+      # AN UPGRADE WITH THE ICON RUNNING. The old package's StopTray has to end
+      # it and wait, or the file is in use and the upgrade only completes at a
+      # reboot — exit 3010, a failure here.
+      - name: Upgrading replaces a running icon and keeps the service
+        shell: pwsh
+        run: |
+          $dir = "$env:ProgramFiles\SSL.com\DTP Agent"
+          $tray = Start-Process "$dir\dtp-agent-tray.exe" -PassThru
+          Start-Sleep -Seconds 3
+          if ($tray.HasExited) { throw "the icon exited by itself, so this cannot show the upgrade stops it" }
+
+          $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
+          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","upgrade.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content upgrade.log -Tail 80
+            throw "the upgrade exited $($p.ExitCode)"
+          }
+          if (Get-Process -Id $tray.Id -ErrorAction SilentlyContinue) { throw "the old icon outlived the upgrade" }
+          $products = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -eq 'DTP Certificate Discovery Agent' }
+          if (@($products).Count -ne 1) { throw "$(@($products).Count) entries in Add/Remove Programs after an upgrade, want 1" }
+          if ($products.DisplayVersion -ne '0.0.1') { throw "installed version is $($products.DisplayVersion) after the upgrade" }
+          (Get-Service DTPAgent).WaitForStatus('Running', '00:00:30')
+          Write-Host "upgraded to $($products.DisplayVersion); old icon stopped; service running"
+
       # The property an uninstall must not break. The state directory holds the
       # keypair DTP has already approved, so removing it would silently turn
       # every reinstall in an estate into a fresh round of approvals. `enroll`
@@ -374,7 +416,7 @@ jobs:
           Start-Sleep -Seconds 3
           if ($tray.HasExited) { throw "the icon exited by itself, so this cannot show the uninstall stops it" }
 
-          $msi = (Get-ChildItem dist\*.msi)[0].FullName
+          $msi = (Resolve-Path dist\dtp-agent_0.0.1-ci_windows_amd64.msi).Path
           $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/l*v","uninstall.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) {
             Get-Content uninstall.log -Tail 80

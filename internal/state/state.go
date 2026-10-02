@@ -98,6 +98,12 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("state directory %s: %w", dir, err)
 	}
+	// WHOSE directory it is, before what its ACL says: an owner can always
+	// rewrite an ACL, so tightening one on a directory somebody else created
+	// protects nothing. See trust_windows.go.
+	if err := trustDir(dir); err != nil {
+		return nil, err
+	}
 	// MkdirAll does NOT change the mode of a directory that already exists, so
 	// a state directory a package or an operator created as 0755 would keep
 	// this agent's private key world-readable forever. Tightened on every open

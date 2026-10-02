@@ -118,18 +118,21 @@ else
   echo "  FAIL  custom actions are: $names (want exactly LaunchTray StopTray)" >&2
   fail=1
 fi
+# WHOLE ROWS, not only the type: the source file and the argument are what
+# decide what runs, as SYSTEM in StopTray's case.
 #   3154 = exe from an installed file (18) + ignore exit code (64)
-#        + async (128) + deferred (1024) + not impersonated (2048): runs as
-#        SYSTEM, inside the transaction, where it can reach every session.
+#        + deferred (1024) + not impersonated (2048): runs as SYSTEM, inside
+#        the transaction, where it can reach every session. Not async: the
+#        installer waits for it, so the files are free before they are touched.
 #    210 = exe from an installed file (18) + ignore (64) + async (128),
 #        immediate: runs as the person installing, after the transaction.
-for want in "StopTray	3154" "LaunchTray	210"; do
+for want in "StopTray	3154	dtp_agent_tray_exe	--stop-all" "LaunchTray	210	dtp_agent_tray_exe	--installed"; do
   name="${want%%	*}"
-  got="$(printf '%s\n' "$actions" | awk -F'\t' -v n="$name" '$1==n {print $2}')"
-  if [ "$got" = "${want##*	}" ]; then
-    echo "  ok    $name has type $got"
+  got="$(printf '%s\n' "$actions" | awk -F'\t' -v n="$name" '$1==n {print $1"\t"$2"\t"$3"\t"$4}')"
+  if [ "$got" = "$want" ]; then
+    echo "  ok    $(printf '%s' "$want" | tr '\t' ' ')"
   else
-    echo "  FAIL  $name has type '${got}', want ${want##*	}" >&2
+    echo "  FAIL  $name is '$(printf '%s' "$got" | tr '\t' ' ')', want '$(printf '%s' "$want" | tr '\t' ' ')'" >&2
     fail=1
   fi
 done
@@ -147,6 +150,20 @@ else
   echo "  FAIL  StopTray is at '${stop}'; it must sit between InstallInitialize ($init) and RemoveFiles ($removefiles)" >&2
   fail=1
 fi
+# AND THE CONDITIONS, which are where a silently dropped attribute would turn
+# "only when there is an icon to stop" into "always", or "never on a silent
+# install" into "always" — launching an icon as SYSTEM in session 0.
+cond() { printf '%s\n' "$seq" | awk -F'\t' -v n="$1" '$1==n {print $2}'; }
+for want in "StopTray	?Tray=3" "LaunchTray	UILevel > 2 AND NOT REMOVE"; do
+  name="${want%%	*}"; c="$(cond "$name")"
+  if [ "$c" = "${want#*	}" ]; then
+    echo "  ok    $name runs only when: $c"
+  else
+    echo "  FAIL  $name's condition is '$c', want '${want#*	}'" >&2
+    fail=1
+  fi
+done
+
 if [ -n "$launch" ] && [ "$launch" -gt "$final" ]; then
   echo "  ok    LaunchTray runs after the install has committed ($launch > $final)"
 else

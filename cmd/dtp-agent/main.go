@@ -60,10 +60,23 @@ func main() {
 	// See console_windows.go.
 	alone := ownsConsole()
 	code := run(alone)
-	if alone {
+	if alone && holdsItsWindow(os.Args[1:]) {
 		holdConsole()
 	}
 	os.Exit(code)
+}
+
+// holdsItsWindow is the short list of invocations a PERSON starts in order to
+// read the answer: the binary on its own (a double-click) and `status` (what
+// the notification-area icon opens through an elevation prompt).
+//
+// NOT EVERY COMMAND. A scheduled task, or a wrapper that starts the agent with
+// a console of its own, looks exactly like a double-click from in here, and a
+// `run` that waited for Enter would sit there for good — and on Task Scheduler,
+// block every later run of the same task behind it. Neither of these two does
+// anything a schedule would want.
+func holdsItsWindow(args []string) bool {
+	return len(args) == 0 || args[0] == "status"
 }
 
 func run(alone bool) int {
@@ -359,6 +372,20 @@ func cmdStatus(args []string) error {
 	dir := stateFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// LOOKING MUST NOT CREATE. Opening the state directory makes it if it is
+	// absent, and made from an unelevated prompt it would belong to whoever
+	// typed `status` — an empty folder the service later has to take back
+	// before it can trust it (see internal/state/trust_windows.go). A machine
+	// with no state yet is simply one that has never been enrolled.
+	if _, err := os.Stat(*dir); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("version   %s\nstate     %s (not created yet)\n", Version, *dir)
+		if st := serviceState(); st != "" {
+			fmt.Printf("service   %s\n", st)
+		}
+		fmt.Println("enrolled  no — run `dtp-agent enroll`")
+		return nil
 	}
 
 	store, err := state.Open(*dir)

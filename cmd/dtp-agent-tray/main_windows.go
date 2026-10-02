@@ -55,11 +55,6 @@ const (
 	// close enough to live without being a load anyone could measure.
 	refreshEvery = 10 * time.Second
 
-	// A notification area that has not accepted the icon in this long is not
-	// going to: a session with no shell, such as an installer running as
-	// SYSTEM. Leaving an invisible process there forever would be a leak.
-	giveUpAfter = 2 * time.Minute
-
 	timerID = 1
 )
 
@@ -76,7 +71,6 @@ var (
 	taskbarCreated uint32
 	nid            notifyIconData
 	added          bool
-	startedAt      = time.Now()
 	icons          = map[tray.Health]windows.Handle{}
 	current        tray.View
 	haveView       bool
@@ -88,6 +82,7 @@ func main() {
 	installed := flag.Bool("installed", false, "started by the installer: say so once")
 	stopAll := flag.Bool("stop-all", false, "end every running copy of the icon (the installer, before it replaces this file)")
 	printView := flag.Bool("print", false, "print what the icon would show, and exit")
+	handedOff := flag.Bool("handed-off", false, "started by an elevated copy of itself, as the desktop's own user")
 	flag.Parse()
 
 	switch {
@@ -105,9 +100,40 @@ func main() {
 		return
 	}
 
+	// THE ICON NEVER RUNS ELEVATED. The installer is elevated, so the copy it
+	// starts would be too — and on a machine where an administrator typed
+	// their password into a standard user's UAC prompt, that copy would sit on
+	// the USER'S desktop holding the ADMINISTRATOR'S token until sign-out:
+	// "Open DTP" would start a browser as the administrator, and "Show full
+	// status" would not even ask. So an elevated copy starts the icon again
+	// as whoever owns the desktop it is on, and leaves.
+	//
+	// --handed-off stops that becoming a loop where the desktop itself runs
+	// elevated (UAC switched off), which has no lower token to hand to.
+	if windows.GetCurrentProcessToken().IsElevated() && !*handedOff {
+		args := "--handed-off"
+		if *installed {
+			args += " --installed"
+		}
+		handOffToShell(args)
+		return
+	}
+
+	// Session 0 has no desktop and no notification area: an installer run
+	// there by a configuration tool. Nothing to show, and nobody to show it to.
+	var session uint32
+	if windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session) == nil && session == 0 {
+		return
+	}
+
 	// One icon per session. Started from the Start menu while one is already
-	// running, the second copy simply leaves.
-	if _, err := windows.CreateMutex(nil, false, windows.StringToUTF16Ptr(`Local\SSL.com-DTPAgentTray`)); err == windows.ERROR_ALREADY_EXISTS {
+	// running, the second copy simply leaves. ACCESS_DENIED means the mutex
+	// exists and belongs to a token this one cannot open — still "running".
+	//
+	// KNOWN LIMITATION: any process in the session can create this name first
+	// and keep the icon away. It can only take away the icon, which the same
+	// user could close from its own menu, so it is not worth a DACL.
+	if h, err := windows.CreateMutex(nil, false, windows.StringToUTF16Ptr(`Local\SSL.com-DTPAgentTray`)); err == windows.ERROR_ALREADY_EXISTS || (h == 0 && err != nil) {
 		return
 	}
 	installedNote = *installed
@@ -157,7 +183,6 @@ func run() error {
 		return err
 	}
 	hwnd = windows.HWND(r)
-	allowFromExplorer(hwnd, wmTrayCallback, taskbarCreated)
 
 	size := systemMetric(smCxSmIcon)
 	if size <= 0 {
@@ -194,6 +219,12 @@ func wndProc(h windows.HWND, message uint32, wParam, lParam uintptr) uintptr {
 			// menu belongs when the icon was chosen from the keyboard.
 			showMenu(int32(int16(wParam&0xffff)), int32(int16((wParam>>16)&0xffff)))
 		case ninBalloonUserClick:
+			// The notification that says "click here for how to enroll" must
+			// do exactly that, not open a menu.
+			if current.NeedsEnrollment {
+				_ = shellExecute("open", enrollDocsURL, "", "")
+				break
+			}
 			var p point
 			procGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
 			showMenu(p.X, p.Y)
@@ -213,6 +244,11 @@ func wndProc(h windows.HWND, message uint32, wParam, lParam uintptr) uintptr {
 		return 0
 	}
 	if message == taskbarCreated && taskbarCreated != 0 {
+		// Also broadcast on a DPI change, when the icon may still be there:
+		// delete first, so the add cannot fail on a duplicate.
+		if added {
+			shellNotifyIcon(nimDelete, &nid)
+		}
 		added = false
 		addIcon()
 		return 0
@@ -255,10 +291,10 @@ func refresh() {
 	current, haveView = v, true
 
 	if !added {
+		// Kept trying for as long as it takes. At a first sign-in Explorer
+		// can be minutes from ready, and a session with no shell at all was
+		// turned away before the window existed.
 		addIcon()
-		if !added && time.Since(startedAt) > giveUpAfter {
-			procPostMessageW.Call(uintptr(hwnd), wmClose, 0, 0)
-		}
 		return
 	}
 
@@ -286,7 +322,7 @@ func addIcon() {
 	}
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
 	utf16Into(nid.SzTip[:], current.Tooltip())
-	if !shellNotifyIcon(nimAdd, &nid) {
+	if !shellNotifyIcon(nimAdd, &nid) && !shellNotifyIcon(nimModify, &nid) {
 		return
 	}
 	added = true
@@ -445,7 +481,7 @@ func stopOthers() {
 		if entry.ProcessID == me || !strings.EqualFold(windows.UTF16ToString(entry.ExeFile[:]), base) {
 			continue
 		}
-		p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, entry.ProcessID)
+		p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, entry.ProcessID)
 		if err != nil {
 			continue
 		}
@@ -453,8 +489,77 @@ func stopOthers() {
 		n := uint32(len(buf))
 		if windows.QueryFullProcessImageName(p, 0, &buf[0], &n) == nil &&
 			strings.EqualFold(windows.UTF16ToString(buf[:n]), self) {
-			_ = windows.TerminateProcess(p, 0)
+			// TerminateProcess only STARTS the end of a process, and the file
+			// stays locked until it is over — so wait, or the installer finds
+			// the file in use anyway and finishes only at a reboot. This is
+			// run by every later upgrade too (as the OLD package's StopTray,
+			// before the new files land), so it has to be right here.
+			//
+			// The icon it leaves behind lingers in the notification area until
+			// the mouse passes over it; that is Windows, and it is harmless.
+			if windows.TerminateProcess(p, 0) == nil {
+				_, _ = windows.WaitForSingleObject(p, 5000)
+			}
 		}
 		windows.CloseHandle(p)
+	}
+}
+
+// handOffToShell starts this program again as the user who owns the desktop,
+// with the token of the desktop's own shell — the token everything the user
+// starts from the Start menu gets. Used only by an elevated copy, so it holds
+// the impersonation privilege CreateProcessWithTokenW needs.
+//
+// Every failure is silent, and safely so: the icon then appears at the user's
+// next sign-in, from the Run key, unelevated.
+func handOffToShell(args string) {
+	shell := windows.GetShellWindow()
+	if shell == 0 {
+		return
+	}
+	var pid uint32
+	if _, err := windows.GetWindowThreadProcessId(shell, &pid); err != nil || pid == 0 {
+		return
+	}
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(p)
+
+	var shellToken windows.Token
+	if err := windows.OpenProcessToken(p, windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &shellToken); err != nil {
+		return
+	}
+	defer shellToken.Close()
+
+	var token windows.Token
+	if err := windows.DuplicateTokenEx(shellToken,
+		windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ADJUST_SESSIONID,
+		nil, windows.SecurityImpersonation, windows.TokenPrimary, &token); err != nil {
+		return
+	}
+	defer token.Close()
+
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmdline, err := windows.UTF16PtrFromString(windows.EscapeArg(self) + " " + args)
+	if err != nil {
+		return
+	}
+	si := windows.StartupInfo{}
+	si.Cb = uint32(unsafe.Sizeof(si))
+	var pi windows.ProcessInformation
+	r, _, _ := procCreateProcessWithTokenW.Call(uintptr(token), 0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(self))),
+		uintptr(unsafe.Pointer(cmdline)),
+		0, 0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(filepath.Dir(self)))),
+		uintptr(unsafe.Pointer(&si)), uintptr(unsafe.Pointer(&pi)))
+	if r != 0 {
+		windows.CloseHandle(pi.Thread)
+		windows.CloseHandle(pi.Process)
 	}
 }

@@ -25,11 +25,17 @@ var procGetConsoleProcessList = windows.NewLazySystemDLL("kernel32.dll").NewProc
 // is false wherever a person or a script is already reading the output, and
 // the behaviour there does not change at all.
 //
-// A service has no console, and the call fails: also false.
+// A service has no console, and the call fails: also false. So does a process
+// whose input is a file or a pipe — a wrapper that redirects stdin is not a
+// person who can press Enter, and holding the window for one would hang it.
 func ownsConsole() bool {
 	var pids [2]uint32
 	n, _, _ := procGetConsoleProcessList.Call(uintptr(unsafe.Pointer(&pids[0])), uintptr(len(pids)))
-	return n == 1
+	if n != 1 {
+		return false
+	}
+	var mode uint32
+	return windows.GetConsoleMode(windows.Handle(os.Stdin.Fd()), &mode) == nil
 }
 
 // holdConsole keeps a console Windows made for this process open until the

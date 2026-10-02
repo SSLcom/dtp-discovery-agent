@@ -70,13 +70,22 @@ func TestPackagingMatchesTheServiceSpec(t *testing.T) {
 	// of these pointed at a shell — would be the first thing in this package
 	// able to run arbitrary code at uninstall, which is how a state directory
 	// gets deleted.
-	actions := regexp.MustCompile(`(?s)<CustomAction\b(.*?)/>`).FindAllStringSubmatch(wxs, -1)
+	//
+	// Matched up to the tag's own ">", so the open-and-close spelling
+	// (<CustomAction ...></CustomAction>) is counted too — the self-closing-
+	// only pattern this replaced let a third action through, measured. An
+	// <?include?> could bring in actions this file never shows, so it is not
+	// allowed at all.
+	if strings.Contains(wxs, "<?include") {
+		t.Error("dtp-agent.wxs uses <?include?>, which could bring in custom actions this test cannot see")
+	}
+	actions := regexp.MustCompile(`<CustomAction\b([^>]*)>`).FindAllStringSubmatch(wxs, -1)
 	allowed := map[string]string{"StopTray": "--stop-all", "LaunchTray": "--installed"}
 	if len(actions) != len(allowed) {
 		t.Errorf("dtp-agent.wxs declares %d custom actions; only %d are allowed", len(actions), len(allowed))
 	}
 	for _, a := range actions {
-		attrs := a[1]
+		attrs := strings.TrimSuffix(a[1], "/")
 		id := attr(attrs, "Id")
 		arg, ok := allowed[id]
 		if !ok {

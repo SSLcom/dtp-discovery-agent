@@ -14,8 +14,11 @@ import (
 // several times the size of the agent for one icon and one menu.
 
 var (
-	user32  = windows.NewLazySystemDLL("user32.dll")
-	shell32 = windows.NewLazySystemDLL("shell32.dll")
+	user32   = windows.NewLazySystemDLL("user32.dll")
+	shell32  = windows.NewLazySystemDLL("shell32.dll")
+	advapi32 = windows.NewLazySystemDLL("advapi32.dll")
+
+	procCreateProcessWithTokenW = advapi32.NewProc("CreateProcessWithTokenW")
 
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -38,7 +41,6 @@ var (
 	procCreateIconFromResourceEx      = user32.NewProc("CreateIconFromResourceEx")
 	procDestroyIcon                   = user32.NewProc("DestroyIcon")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
-	procChangeWindowMessageFilterEx   = user32.NewProc("ChangeWindowMessageFilterEx")
 	procShellNotifyIconW              = shell32.NewProc("Shell_NotifyIconW")
 )
 
@@ -87,8 +89,6 @@ const (
 	smCySmIcon = 50
 
 	swShowNormal = 1
-
-	msgfltAllow = 1
 )
 
 // NOTIFYICONDATAW. Go lays the fields out with the same natural alignment as
@@ -176,18 +176,4 @@ func appendMenu(menu uintptr, flags uint32, id uintptr, text string) {
 		p, _ = windows.UTF16PtrFromString(text)
 	}
 	procAppendMenuW.Call(menu, uintptr(flags), id, uintptr(unsafe.Pointer(p)))
-}
-
-// allowFromExplorer lets the shell's messages through to this window even when
-// this process runs at a higher integrity level than Explorer — which it does
-// when the installer starts it, because the installer is elevated.
-//
-// WITHOUT THIS THE ICON IS DEAD TO THE MOUSE. User Interface Privilege Isolation
-// drops messages sent upward in integrity, so Explorer's notifications about
-// clicks never arrive: the icon appears, and nothing happens when it is
-// clicked, until the user signs out and the unelevated copy takes over.
-func allowFromExplorer(h windows.HWND, messages ...uint32) {
-	for _, m := range messages {
-		procChangeWindowMessageFilterEx.Call(uintptr(h), uintptr(m), msgfltAllow, 0)
-	}
 }
