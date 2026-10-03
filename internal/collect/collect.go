@@ -104,10 +104,11 @@ func noteShortfall(res *Result, source, location string, short parse.Shortfall) 
 				parse.MaxCertificatesPerStore, parse.MaxLeavesPerStore),
 		})
 	}
-	if short.OutOfBudget {
+	if short.OutOfBudget || short.TooDeep {
 		res.Errors = append(res.Errors, Error{
 			Collector: source, Location: location,
-			Error: "holds more possible issuers than the agent will check signatures for; every certificate was reported, some with a shorter chain than the file holds",
+			Error: fmt.Sprintf("holds more possible issuers than the agent will check signatures for, or a chain deeper than %d; every certificate was reported, some with a shorter chain than the file holds",
+				parse.MaxChainDepth),
 		})
 	}
 }

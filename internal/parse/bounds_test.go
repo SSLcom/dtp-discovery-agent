@@ -168,9 +168,19 @@ func TestAChainStopsAtTheDepthLimit(t *testing.T) {
 	}
 	leaf := mint(t, "www.example.com", false, &ca)
 
-	got := Leaves(context.Background(), append(certs, leaf.cert))
+	store := NewStore(context.Background(), nil, append(certs, leaf.cert))
+	got := store.Leaves()
 	if len(got) != 1 || len(got[0].Chain) != MaxChainDepth {
 		t.Fatalf("got %d leaves, chain of %d; want 1 leaf with a chain of %d", len(got), len(got[0].Chain), MaxChainDepth)
+	}
+	if !store.Shortfall().TooDeep {
+		t.Errorf("shortfall %+v, want TooDeep", store.Shortfall())
+	}
+
+	// Exactly MaxChainDepth is a whole chain, not a cut one.
+	exact := NewStore(context.Background(), nil, append(certs[len(certs)-MaxChainDepth:], leaf.cert))
+	if got := exact.Leaves(); len(got[0].Chain) != MaxChainDepth || exact.Shortfall().TooDeep {
+		t.Errorf("a chain of exactly %d: got %d, shortfall %+v", MaxChainDepth, len(got[0].Chain), exact.Shortfall())
 	}
 }
 

@@ -86,7 +86,12 @@ chain.** A file holding several sites' certificates is several certificates, not
 one with the others as its chain. A chain holds only certificates from the same
 file (or keystore entry, configured chain file, or TLS handshake) that actually
 issued it — the subject matches its issuer *and* the signature verifies — leaf
-side first. A file of nothing but CA certificates that has a key beside it is
+side first. Where several could have issued it (one CA key under a self-signed
+root and a cross-signed copy), the one valid now is taken, then the
+self-signed root, then the earlier in the file. A certificate with no
+basicConstraints that signed another one in the same file — a v1 root, a legacy
+intermediate — is a CA, not a site. DTP applies the same rules to an uploaded
+bundle. A file of nothing but CA certificates that has a key beside it is
 reported as its first certificate, as before.
 
 **What one file can cost is bounded**, because a file under a scanned root may

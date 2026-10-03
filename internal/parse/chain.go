@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"math/bits"
+	"time"
 )
 
 // Limits on the work one store can cost. A store is whatever one file, one
@@ -74,6 +75,9 @@ type Shortfall struct {
 	// chains stop where the budget did, and a certificate whose issuance of
 	// another could not be checked in time is reported as a leaf.
 	OutOfBudget bool
+	// TooDeep: a chain climbed MaxChainDepth certificates and was cut there.
+	// No real PKI is that deep; a store built to make the walk climb is.
+	TooDeep bool
 	// Interrupted: the context was cancelled part-way. What came back is real,
 	// and incomplete.
 	Interrupted bool
@@ -85,6 +89,7 @@ func (s Shortfall) Add(other Shortfall) Shortfall {
 	return Shortfall{
 		Truncated:   s.Truncated || other.Truncated,
 		OutOfBudget: s.OutOfBudget || other.OutOfBudget,
+		TooDeep:     s.TooDeep || other.TooDeep,
 		Interrupted: s.Interrupted || other.Interrupted,
 	}
 }
@@ -105,11 +110,13 @@ func (s Shortfall) Add(other Shortfall) Shortfall {
 // Not safe for concurrent use.
 type Store struct {
 	ctx  context.Context
+	now  time.Time
 	all  []*x509.Certificate // the input, then the extra issuers; unique by DER
 	ours int                 // all[:ours] is the input; the rest are extra issuers
 
 	canonical map[string]*x509.Certificate   // DER → the one copy in all
 	bySubject map[string][]*x509.Certificate // subject → possible issuers, in order
+	byIssuer  map[string][]*x509.Certificate // issuer name → certificates claiming it
 
 	checked map[pair]bool
 	budget  *Budget
@@ -131,8 +138,10 @@ func NewStore(ctx context.Context, budget *Budget, certs []*x509.Certificate, is
 	}
 	s := &Store{
 		ctx:       ctx,
+		now:       time.Now(),
 		canonical: map[string]*x509.Certificate{},
 		bySubject: map[string][]*x509.Certificate{},
+		byIssuer:  map[string][]*x509.Certificate{},
 		checked:   map[pair]bool{},
 		budget:    budget,
 	}
@@ -146,6 +155,7 @@ func NewStore(ctx context.Context, budget *Budget, certs []*x509.Certificate, is
 		}
 		s.canonical[string(cert.Raw)] = cert
 		s.all = append(s.all, cert)
+		s.byIssuer[string(cert.RawIssuer)] = append(s.byIssuer[string(cert.RawIssuer)], cert)
 		if mayIssue(cert) {
 			s.bySubject[string(cert.RawSubject)] = append(s.bySubject[string(cert.RawSubject)], cert)
 		}
@@ -192,6 +202,15 @@ func (s *Store) Shortfall() Shortfall { return s.short }
 // certificate anyway (see ChainFor), because whatever is in there is what that
 // site presents.
 //
+// A CERTIFICATE THAT ISSUED ANOTHER ONE IN THE SAME STORE IS NOT A LEAF, whatever
+// its extensions fail to say. A v1 root has no extensions at all, and legacy
+// private PKIs run intermediates with no basicConstraints, so to x509 both look
+// like end-entity certificates — and a chain file of either was reported as a
+// site certificate. Its key verifying another certificate's signature in the
+// same store settles what it is. The server applies the same rule
+// (DTP::Crypto::CertificateInput), so the two agree on what a bundle's leaves
+// are.
+//
 // A certificate that appears twice in the input is reported once. Each chain is
 // built by ChainFor from the input plus the extra issuers, so a certificate
 // that happens to share the file never rides along as somebody else's issuer.
@@ -202,7 +221,7 @@ func (s *Store) Leaves() []LeafWithChain {
 			s.short.Interrupted = true
 			break
 		}
-		if cert.IsCA {
+		if cert.IsCA || s.issuedAnother(cert) {
 			continue
 		}
 		if len(out) == MaxLeavesPerStore {
@@ -234,6 +253,14 @@ func (s *Store) Leaves() []LeafWithChain {
 // to see the weak link to replace it. The one constraint kept is the one that
 // says a certificate is NOT a CA — basicConstraints present with CA:FALSE — so
 // a site certificate can never be filed as another one's issuer.
+//
+// WHEN SEVERAL CANDIDATES SIGNED IT, the best is taken, not the first: one
+// valid now over one expired or not yet valid, then a self-signed root over a
+// cross-signed copy of the same CA, then the earlier in the input. That is the
+// cross-signing case — the same CA key under a self-signed root and under an
+// older root's signature, both in the bundle — and taking the first let an
+// expired cross-sign (the DST Root CA X3 path of 2021) be reported as the chain
+// while the valid one sat beside it. The server picks the same way.
 func (s *Store) ChainFor(cert *x509.Certificate) []*x509.Certificate {
 	if c := s.canonical[string(cert.Raw)]; c != nil {
 		cert = c
@@ -241,9 +268,13 @@ func (s *Store) ChainFor(cert *x509.Certificate) []*x509.Certificate {
 	var chain []*x509.Certificate
 	visited := map[*x509.Certificate]bool{cert: true}
 	current := cert
-	for len(chain) < MaxChainDepth && !s.selfSigned(current) {
+	for !s.selfSigned(current) {
 		next := s.issuerOf(current, visited)
 		if next == nil {
+			break
+		}
+		if len(chain) == MaxChainDepth {
+			s.short.TooDeep = true
 			break
 		}
 		visited[next] = true
@@ -253,21 +284,60 @@ func (s *Store) ChainFor(cert *x509.Certificate) []*x509.Certificate {
 	return chain
 }
 
-// issuerOf is the first candidate that signed cert (see ChainFor), or nil.
+// issuerOf is the best candidate that signed cert (see ChainFor), or nil.
+//
+// Every candidate is checked, because the best is not necessarily the first to
+// verify. If the budget runs out before they all are, the answer is nil rather
+// than the best so far: a link the rules might not have chosen is a wrong
+// chain, and a short one is merely incomplete.
 func (s *Store) issuerOf(cert *x509.Certificate, visited map[*x509.Certificate]bool) *x509.Certificate {
+	var best *x509.Certificate
+	bestRank := -1
 	for _, ca := range s.bySubject[string(cert.RawIssuer)] {
 		if visited[ca] {
 			continue // Itself, or a cycle.
 		}
-		if s.signed(cert, ca) {
-			return ca
+		if !s.signed(cert, ca) {
+			continue
+		}
+		rank := 0
+		if s.validNow(ca) {
+			rank += 2
+		}
+		if s.selfSigned(ca) {
+			rank++
+		}
+		if rank > bestRank {
+			best, bestRank = ca, rank
 		}
 	}
-	return nil
+	if s.short.OutOfBudget || s.short.Interrupted {
+		return nil
+	}
+	return best
+}
+
+// issuedAnother reports whether cert provably signed some OTHER certificate in
+// the store. Only certificates that may issue are asked, so for an ordinary
+// site certificate — basicConstraints CA:FALSE — this costs nothing.
+func (s *Store) issuedAnother(cert *x509.Certificate) bool {
+	if !mayIssue(cert) {
+		return false
+	}
+	for _, child := range s.byIssuer[string(cert.RawSubject)] {
+		if child != cert && s.signed(child, cert) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) selfSigned(cert *x509.Certificate) bool {
 	return bytes.Equal(cert.RawSubject, cert.RawIssuer) && s.signed(cert, cert)
+}
+
+func (s *Store) validNow(cert *x509.Certificate) bool {
+	return !s.now.Before(cert.NotBefore) && !s.now.After(cert.NotAfter)
 }
 
 // signed reports whether issuer's key verifies child's signature, checking each
