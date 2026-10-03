@@ -267,22 +267,24 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			}
 		}
 
-		// A configured certificate is reported WHATEVER it holds. Unlike a file
-		// the agent merely came across, this one is what the site presents — so
-		// if someone has pointed ssl_certificate at a chain file, that is a
-		// finding rather than something to skip, and the first certificate in
-		// it is the one reported, as the server would load it. Where there are
-		// end-entity certificates they are preferred, because bundles are not
-		// reliably ordered — and EVERY one is reported, each with its own
-		// chain, so a second site's certificate in the same file is a
-		// certificate in the portfolio rather than an entry in this one's
-		// chain.
-		found := parse.Leaves(parsed.Certificates, issuers...)
-		if len(found) == 0 {
-			first := parsed.Certificates[0]
-			candidates := append(append([]*x509.Certificate{}, parsed.Certificates...), issuers...)
-			found = []parse.LeafWithChain{{Leaf: first, Chain: parse.ChainFor(first, candidates)}}
-		}
+		// THE SERVED CERTIFICATE, AND ONLY IT. nginx and Apache both serve the
+		// FIRST certificate in the configured file and send the rest as its
+		// chain — a file whose first certificate is not the one the key opens
+		// fails to load, so on a running server the first is the leaf. That
+		// holds whatever it is: if someone has pointed ssl_certificate at a
+		// chain file, that is a finding rather than something to skip.
+		//
+		// A binding is a claim that THIS SITE PRESENTS THIS CERTIFICATE, so it
+		// is not attached to anything else in the file. A second site's
+		// certificate pasted into the same file is not served by this site;
+		// it is reported by the file collector when the file sits under a scan
+		// root, with no site binding — which is what is true of it.
+		//
+		// The chain is what the rest of the file and the chain file actually
+		// issued, not everything that happened to be in them (parse.ChainFor).
+		served := parsed.Certificates[0]
+		candidates := append(append([]*x509.Certificate{}, parsed.Certificates[1:]...), issuers...)
+		chain := parse.ChainFor(served, candidates)
 
 		binding := map[string]string{
 			"server":           host.Server,
@@ -299,24 +301,22 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			binding["listen"] = strings.Join(host.Listen, " ")
 		}
 
-		for _, f := range found {
-			res.Observations = append(res.Observations, Observation{
-				CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
-				ChainPEM:       parse.EncodePEM(f.Chain),
-				Source:         SourceServerConfig,
-				Location:       host.location(),
-				Binding:        binding,
-				// The configuration TELLS us where the key is. That is better than
-				// the file collector's guess from a matching filename, and it is
-				// why this is worth recording here as well: a key nobody would have
-				// looked for is still a key sitting at mode 0644.
-				PrivateKeyPresent:  ref.Key != "" || parsed.HadPrivateKey,
-				PrivateKeyLocation: ref.Key,
-				FileMode:           fileModeOf(ref.Certificate),
-				FileOwner:          fileOwnerOf(ref.Certificate),
-				ObservedAt:         time.Now().UTC(),
-			})
-		}
+		res.Observations = append(res.Observations, Observation{
+			CertificatePEM: parse.EncodePEM([]*x509.Certificate{served}),
+			ChainPEM:       parse.EncodePEM(chain),
+			Source:         SourceServerConfig,
+			Location:       host.location(),
+			Binding:        binding,
+			// The configuration TELLS us where the key is. That is better than
+			// the file collector's guess from a matching filename, and it is
+			// why this is worth recording here as well: a key nobody would have
+			// looked for is still a key sitting at mode 0644.
+			PrivateKeyPresent:  ref.Key != "" || parsed.HadPrivateKey,
+			PrivateKeyLocation: ref.Key,
+			FileMode:           fileModeOf(ref.Certificate),
+			FileOwner:          fileOwnerOf(ref.Certificate),
+			ObservedAt:         time.Now().UTC(),
+		})
 	}
 }
 

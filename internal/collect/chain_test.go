@@ -195,9 +195,10 @@ func TestApacheChainFileContributesOnlyTheIssuersThatSigned(t *testing.T) {
 	wantReported(t, collectApache(t, dir, "apache2.conf"), "www.example.com -> [Intermediate, Root]")
 }
 
-// A configured file holding two sites' certificates reports both, each against
-// the site that configured the file.
-func TestAConfiguredFileOfTwoSitesReportsBoth(t *testing.T) {
+// A configured file holding two sites' certificates reports only the one the
+// server SERVES — the first — because a site binding is a deployment claim. The
+// other is the file collector's to report, without a binding.
+func TestAConfiguredFileOfTwoSitesReportsOnlyTheServedOne(t *testing.T) {
 	inter := mint(t, "Intermediate", true, nil)
 	a := mint(t, "a.example.com", false, &inter)
 	b := mint(t, "b.example.com", false, nil)
@@ -216,11 +217,9 @@ http {
 	writePEM(t, filepath.Join(dir, "ssl/both.pem"), a.cert, inter.cert, b.cert)
 
 	res := collectNginx(t, dir, "nginx.conf")
-	wantReported(t, res, "a.example.com -> [Intermediate]", "b.example.com -> []")
-	for _, o := range res.Observations {
-		if o.Binding["server_name"] != "a.example.com" {
-			t.Errorf("binding = %v", o.Binding)
-		}
+	wantReported(t, res, "a.example.com -> [Intermediate]")
+	if o := onlyObservation(t, res); o.Binding["server_name"] != "a.example.com" {
+		t.Errorf("binding = %v", o.Binding)
 	}
 }
 
