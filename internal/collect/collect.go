@@ -68,6 +68,8 @@ type Result struct {
 	Observations []Observation
 	Errors       []Error
 	Completed    bool
+
+	capped bool // the run's limit refused an observation; see observe
 }
 
 // Collector is one way of finding certificates on a host.

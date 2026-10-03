@@ -99,7 +99,7 @@ func (c *OSStore) Collect(ctx context.Context) Result {
 			binding["friendly_name"] = entry.FriendlyName
 		}
 
-		res.Observations = append(res.Observations, Observation{
+		recorded := res.observe(ctx, Observation{
 			CertificatePEM: parse.EncodePEM([]*x509.Certificate{entry.Certificate}),
 			Source:         SourceOSStore,
 			// The STORE, not the certificate. Several certificates in one store
@@ -114,6 +114,9 @@ func (c *OSStore) Collect(ctx context.Context) Result {
 			PrivateKeyLocation: keyLocation(entry.Store, entry.HasPrivateKey),
 			ObservedAt:         time.Now().UTC(),
 		})
+		if !recorded {
+			break
+		}
 	}
 	return res
 }

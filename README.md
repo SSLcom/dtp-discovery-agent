@@ -99,6 +99,11 @@ errors; exceeding a count names the file too and leaves the `file` (or
 `java_keystore`) sweep incomplete, so nothing it missed is marked gone. A stop
 request interrupts a file part-way rather than waiting for it.
 
+**A whole run is bounded too**: at most 20,000 certificates, or 128 MiB of them
+with their chains, across every source. Past that the scan stops collecting,
+the source it was in and every source after it are reported incomplete with
+the reason in the run's errors, and the agent's log says so.
+
 ### Java keystores (`java_keystore`)
 
 **Invisible to every other collector.** A `.jks` is neither PEM nor DER, so a

@@ -190,6 +190,9 @@ func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res
 			return nil
 		}
 		c.examine(ctx, path, info, res, examined)
+		if runFull(ctx) {
+			return filepath.SkipAll
+		}
 		return nil
 	})
 }
@@ -284,7 +287,9 @@ func (c *Keystores) examine(ctx context.Context, path string, info fs.FileInfo, 
 			found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
 		}
 		for _, f := range found {
-			res.Observations = append(res.Observations, keystoreObservation(path, format, entry, f, info))
+			if !res.observe(ctx, keystoreObservation(path, format, entry, f, info)) {
+				return
+			}
 		}
 	}
 }

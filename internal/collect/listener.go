@@ -164,7 +164,11 @@ func (c *Listener) probeAll(ctx context.Context, b ListenerBounds, targets []soc
 	wg.Wait()
 
 	for _, out := range results {
-		res.Observations = append(res.Observations, out.observations...)
+		for _, o := range out.observations {
+			if !res.observe(ctx, o) {
+				break
+			}
+		}
 		res.Errors = append(res.Errors, out.errs...)
 		if out.incomplete {
 			res.Completed = false

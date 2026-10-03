@@ -162,6 +162,9 @@ func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen 
 			return nil
 		}
 		c.examine(ctx, path, info, res, examined)
+		if runFull(ctx) {
+			return filepath.SkipAll
+		}
 		return nil
 	})
 }
@@ -237,7 +240,7 @@ func (c *FS) examine(ctx context.Context, path string, info fs.FileInfo, res *Re
 	}
 	noteShortfall(res, SourceFile, path, store.Shortfall())
 	for _, f := range found {
-		res.Observations = append(res.Observations, Observation{
+		recorded := res.observe(ctx, Observation{
 			CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
 			ChainPEM:       parse.EncodePEM(f.Chain),
 			Source:         SourceFile,
@@ -251,6 +254,9 @@ func (c *FS) examine(ctx context.Context, path string, info fs.FileInfo, res *Re
 			FileOwner:          fileOwner(info),
 			ObservedAt:         time.Now().UTC(),
 		})
+		if !recorded {
+			return
+		}
 	}
 }
 

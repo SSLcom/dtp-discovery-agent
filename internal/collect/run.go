@@ -77,12 +77,44 @@ type Informed interface {
 	Inform(earlier []Result)
 }
 
+// Limits on what one run may report, across every source.
+//
+// ONE FILE CAN BE HUNDREDS OF OBSERVATIONS, since every end-entity certificate
+// in it is reported, and each carries its own chain. A host whose scanned
+// directories somebody else can write to could otherwise make a run of a
+// million observations, held in memory and uploaded page after page. Past
+// either limit the run stops collecting, and says so (see observe).
+const (
+	// MaxObservationsPerRun: forty pages at the protocol's 500. A large web
+	// host — a few thousand sites, each seen as a file, in its server
+	// configuration and on its listener — comes to around ten thousand.
+	MaxObservationsPerRun = 20000
+
+	// MaxObservationBytesPerRun bounds the certificates and chains those
+	// observations carry. A real observation is a few KiB of PEM, so this is
+	// MaxObservationsPerRun of them with room to spare; it is what binds when
+	// a planted file pairs many leaves with one long chain of oversized
+	// certificates, which every one of them would otherwise carry in full.
+	MaxObservationBytesPerRun = 128 << 20
+)
+
 // Run executes the enabled collectors in order, giving each what the earlier
 // ones found.
 func Run(ctx context.Context, opts Options) []Result {
+	return runWithin(ctx, opts, &runCap{maxCount: MaxObservationsPerRun, maxBytes: MaxObservationBytesPerRun})
+}
+
+func runWithin(ctx context.Context, opts Options, limit *runCap) []Result {
+	ctx = context.WithValue(ctx, runCapKey{}, limit)
 	var out []Result
 	for _, c := range All(opts) {
 		if slices.Contains(opts.Disabled, c.Source()) {
+			continue
+		}
+		if limit.full {
+			// Not run at all, and not complete: nothing it would have found
+			// may be marked gone because the run filled up before reaching it.
+			out = append(out, Result{Source: c.Source(), Errors: []Error{limit.error(c.Source(), "was not run")}, capped: true})
 			continue
 		}
 		if informed, ok := c.(Informed); ok {
@@ -91,4 +123,71 @@ func Run(ctx context.Context, opts Options) []Result {
 		out = append(out, c.Collect(ctx))
 	}
 	return out
+}
+
+// runCap is what a run has reported so far, against its limits. Collectors run
+// one at a time and each records from one goroutine, so it needs no lock.
+type runCap struct {
+	maxCount, maxBytes int
+	count, bytes       int
+	full               bool
+}
+
+type runCapKey struct{}
+
+func (c *runCap) error(source, what string) Error {
+	return Error{
+		Collector: source,
+		Error: fmt.Sprintf("this run reached its limit of %d certificates (or %d MiB of them) and the rest of this source %s; nothing it would have found is marked absent",
+			c.maxCount, c.maxBytes>>20, what),
+	}
+}
+
+// observe adds o to the result while the run has room for it, and reports
+// whether it did. The first observation refused marks the collector incomplete
+// — the server must not take what it never received as removed — and says so
+// in its errors, once; the scan prints those, and the server records them with
+// the run. The protocol has no other way to say "truncated", and needs none:
+// an incomplete source with a named reason is exactly that.
+//
+// A collector run outside Run (a test, one source on its own) has no limit.
+func (r *Result) observe(ctx context.Context, o Observation) bool {
+	limit, _ := ctx.Value(runCapKey{}).(*runCap)
+	if limit == nil {
+		r.Observations = append(r.Observations, o)
+		return true
+	}
+	size := len(o.CertificatePEM) + len(o.ChainPEM)
+	if limit.full || limit.count+1 > limit.maxCount || limit.bytes+size > limit.maxBytes {
+		limit.full = true
+		if !r.capped {
+			r.capped = true
+			r.Completed = false
+			r.Errors = append(r.Errors, limit.error(r.Source, "was not reported"))
+		}
+		return false
+	}
+	limit.count++
+	limit.bytes += size
+	r.Observations = append(r.Observations, o)
+	return true
+}
+
+// ReachedRunLimit reports whether these results were cut short by the run's
+// limits, for a caller that should say so in its own log as well as in what it
+// uploads.
+func ReachedRunLimit(results []Result) bool {
+	for _, r := range results {
+		if r.capped {
+			return true
+		}
+	}
+	return false
+}
+
+// runFull reports whether the run has stopped taking observations, so a walk
+// can stop rather than read files whose findings would be refused.
+func runFull(ctx context.Context) bool {
+	limit, _ := ctx.Value(runCapKey{}).(*runCap)
+	return limit != nil && limit.full
 }

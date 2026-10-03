@@ -198,7 +198,11 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 	// a site's certificate is not in its configuration file but in HTTP.sys and
 	// the certificate store, so there is no path to open and parse.
 	observations, problems, complete := iisObservations()
-	res.Observations = append(res.Observations, observations...)
+	for _, o := range observations {
+		if !res.observe(ctx, o) {
+			break
+		}
+	}
 	res.Errors = append(res.Errors, problems...)
 	if !complete {
 		res.Completed = false
@@ -302,7 +306,7 @@ func (c *ServerConfig) record(ctx context.Context, host vhost, res *Result) {
 			binding["listen"] = strings.Join(host.Listen, " ")
 		}
 
-		res.Observations = append(res.Observations, Observation{
+		recorded := res.observe(ctx, Observation{
 			CertificatePEM: parse.EncodePEM([]*x509.Certificate{served}),
 			ChainPEM:       parse.EncodePEM(chain),
 			Source:         SourceServerConfig,
@@ -318,6 +322,9 @@ func (c *ServerConfig) record(ctx context.Context, host vhost, res *Result) {
 			FileOwner:          fileOwnerOf(ref.Certificate),
 			ObservedAt:         time.Now().UTC(),
 		})
+		if !recorded {
+			return
+		}
 	}
 }
 
