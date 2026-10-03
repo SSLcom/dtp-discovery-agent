@@ -32,6 +32,10 @@ import (
 //	trust.pem     nothing but CA certificates and NO key — a trust store, which
 //	              must NOT be reported, or every host uploads its issuer list
 //	keystore.jks  keytool's own output, reachable through two overlapping roots
+//	sites.pem     THREE sites' certificates in one file, two of them issued by
+//	              the intermediate that sits beside them and one by a CA that
+//	              is not there, plus an unrelated root. Up to v0.4.0 this was
+//	              ONE observation carrying the other two sites as its "chain".
 func seedHost(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -73,6 +77,8 @@ func seedHost(t *testing.T) string {
 		t.Fatal(err)
 	}
 
+	writeSites(t, mk("ssl", "sites.pem"), now)
+
 	// keytool's own output — see internal/parse/testdata/README.md for why a
 	// fixture this repository generated would prove nothing.
 	jks, err := os.ReadFile(filepath.Join("..", "internal", "parse", "testdata", "real.jks"))
@@ -109,6 +115,65 @@ func seedHost(t *testing.T) string {
 		}
 	}
 	return root
+}
+
+// The sites in sites.pem, and the chain each must arrive with — by common name,
+// leaf side first.
+var sitesInOneFile = map[string][]string{
+	"site-a.e2e.invalid": {"E2E Intermediate"},
+	"site-b.e2e.invalid": {"E2E Intermediate"},
+	"site-c.e2e.invalid": nil,
+}
+
+func writeSites(t *testing.T, path string, now time.Time) {
+	t.Helper()
+	issue := func(cn string, isCA bool, parent *x509.Certificate, parentKey *rsa.PrivateKey) (*x509.Certificate, *rsa.PrivateKey) {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(time.Now().UnixNano()),
+			Subject:               pkix.Name{CommonName: cn},
+			NotBefore:             now.Add(-time.Hour),
+			NotAfter:              now.Add(90 * 24 * time.Hour),
+			IsCA:                  isCA,
+			BasicConstraintsValid: true,
+		}
+		if !isCA {
+			tmpl.DNSNames = []string{cn}
+		}
+		if parent == nil {
+			parent, parentKey = tmpl, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert, key
+	}
+	root, rootKey := issue("E2E Root", true, nil, nil)
+	inter, interKey := issue("E2E Intermediate", true, root, rootKey)
+	elsewhere, elsewhereKey := issue("E2E Absent CA", true, nil, nil)
+	unrelated, _ := issue("E2E Unrelated Root", true, nil, nil)
+	a, _ := issue("site-a.e2e.invalid", false, inter, interKey)
+	b, _ := issue("site-b.e2e.invalid", false, inter, interKey)
+	c, _ := issue("site-c.e2e.invalid", false, elsewhere, elsewhereKey)
+
+	// The root that issued the intermediate is deliberately NOT here, so the
+	// intermediate is where the chain stops — and the unrelated root must
+	// appear in nobody's chain.
+	var out []byte
+	for _, cert := range []*x509.Certificate{a, inter, b, unrelated, c} {
+		out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func makeCert(t *testing.T, cn string, isCA bool, from, to time.Time) ([]byte, *rsa.PrivateKey) {

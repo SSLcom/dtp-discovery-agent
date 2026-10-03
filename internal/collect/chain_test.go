@@ -1,0 +1,299 @@
+package collect
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/SSLcom/dtp-discovery-agent/internal/parse"
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
+)
+
+// ── fixtures ─────────────────────────────────────────────────────────────────
+
+// minted is a certificate together with the key that can sign under it.
+type minted struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+}
+
+var mintSerial atomic.Int64
+
+// mint makes a certificate named cn, signed by parent — or self-signed when
+// parent is nil.
+func mint(t *testing.T, cn string, isCA bool, parent *minted) minted {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(mintSerial.Add(1)),
+		Subject:               pkix.Name{CommonName: cn},
+		DNSNames:              []string{cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  isCA,
+		BasicConstraintsValid: true,
+	}
+	if isCA {
+		tmpl.DNSNames = nil
+	}
+	signer, signerKey := tmpl, key
+	if parent != nil {
+		signer, signerKey = parent.cert, parent.key
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, signer, &key.PublicKey, signerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return minted{cert: cert, key: key}
+}
+
+func writePEM(t *testing.T, path string, certs ...*x509.Certificate) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(parse.EncodePEM(certs)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reported reads each observation back through the agent's own parser, as
+// "leaf CN -> chain CNs", sorted — what DTP would receive, not what the fixture
+// put in.
+func reported(t *testing.T, res Result) []string {
+	t.Helper()
+	var out []string
+	for _, o := range res.Observations {
+		leaf, err := parse.Certificates([]byte(o.CertificatePEM))
+		if err != nil || len(leaf.Certificates) != 1 {
+			t.Fatalf("observation at %s does not carry exactly one certificate", o.Location)
+		}
+		var chain []string
+		if o.ChainPEM != "" {
+			parsed, err := parse.Certificates([]byte(o.ChainPEM))
+			if err != nil {
+				t.Fatalf("unparsable chain at %s: %v", o.Location, err)
+			}
+			for _, c := range parsed.Certificates {
+				chain = append(chain, c.Subject.CommonName)
+			}
+		}
+		out = append(out, leaf.Certificates[0].Subject.CommonName+" -> ["+strings.Join(chain, ", ")+"]")
+	}
+	sort.Strings(out)
+	return out
+}
+
+func wantReported(t *testing.T, res Result, want ...string) {
+	t.Helper()
+	got := reported(t, res)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("reported:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
+// ── file ─────────────────────────────────────────────────────────────────────
+
+// THE BUG: a .pem of several sites' certificates was one observation, with the
+// other sites sent as its chain and never reported as certificates. Here two
+// sites share an intermediate, a third came from somewhere else, and one of
+// them was pasted in twice.
+func TestAFileOfSeveralSitesIsSeveralCertificates(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	other := mint(t, "Other CA", true, nil)
+	a := mint(t, "a.example.com", false, &inter)
+	b := mint(t, "b.example.com", false, &inter)
+	c := mint(t, "c.example.com", false, &other)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sites.pem")
+	writePEM(t, path, a.cert, b.cert, inter.cert, c.cert, a.cert)
+
+	res := collectIn(t, dir)
+	wantReported(t, res,
+		"a.example.com -> [Intermediate]",
+		"b.example.com -> [Intermediate]",
+		"c.example.com -> []",
+	)
+	for _, o := range res.Observations {
+		if o.Location != path || o.Source != SourceFile {
+			t.Errorf("observation at %s/%s, want the file itself", o.Source, o.Location)
+		}
+	}
+}
+
+// A root-first bundle is reported leaf to root.
+func TestARootFirstBundleIsReportedLeafToRoot(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	leaf := mint(t, "www.example.com", false, &inter)
+
+	dir := t.TempDir()
+	writePEM(t, filepath.Join(dir, "fullchain.pem"), root.cert, inter.cert, leaf.cert)
+
+	wantReported(t, collectIn(t, dir), "www.example.com -> [Intermediate, Root]")
+}
+
+// A file of only CA certificates WITH a key beside it is reported as it always
+// was — its first certificate — but its chain holds only what issued that one.
+func TestACABundleWithAKeyReportsItsFirstCertificateWithAFilteredChain(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	unrelated := mint(t, "Unrelated Root", true, nil)
+
+	dir := t.TempDir()
+	writePEM(t, filepath.Join(dir, "ca.pem"), inter.cert, unrelated.cert, root.cert)
+	writeKey(t, filepath.Join(dir, "ca.key"))
+
+	wantReported(t, collectIn(t, dir), "Intermediate -> [Root]")
+}
+
+// ── server config ────────────────────────────────────────────────────────────
+
+// Apache's SSLCertificateChainFile is a list of POSSIBLE issuers. A shared
+// bundle of every intermediate on the host used to be appended to every site's
+// chain wholesale.
+func TestApacheChainFileContributesOnlyTheIssuersThatSigned(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	stray := mint(t, "Stray Intermediate", true, &root)
+	leaf := mint(t, "www.example.com", false, &inter)
+
+	dir := tree(t, map[string]string{
+		"apache2.conf": `
+<VirtualHost *:443>
+    ServerName www.example.com
+    SSLCertificateFile      {{root}}/ssl/site.pem
+    SSLCertificateChainFile {{root}}/ssl/chain.pem
+</VirtualHost>
+`,
+	})
+	writePEM(t, filepath.Join(dir, "ssl/site.pem"), leaf.cert)
+	writePEM(t, filepath.Join(dir, "ssl/chain.pem"), stray.cert, inter.cert, root.cert)
+
+	wantReported(t, collectApache(t, dir, "apache2.conf"), "www.example.com -> [Intermediate, Root]")
+}
+
+// A configured file holding two sites' certificates reports both, each against
+// the site that configured the file.
+func TestAConfiguredFileOfTwoSitesReportsBoth(t *testing.T) {
+	inter := mint(t, "Intermediate", true, nil)
+	a := mint(t, "a.example.com", false, &inter)
+	b := mint(t, "b.example.com", false, nil)
+
+	dir := tree(t, map[string]string{
+		"nginx.conf": `
+http {
+    server {
+        listen 443 ssl;
+        server_name a.example.com;
+        ssl_certificate {{root}}/ssl/both.pem;
+    }
+}
+`,
+	})
+	writePEM(t, filepath.Join(dir, "ssl/both.pem"), a.cert, inter.cert, b.cert)
+
+	res := collectNginx(t, dir, "nginx.conf")
+	wantReported(t, res, "a.example.com -> [Intermediate]", "b.example.com -> []")
+	for _, o := range res.Observations {
+		if o.Binding["server_name"] != "a.example.com" {
+			t.Errorf("binding = %v", o.Binding)
+		}
+	}
+}
+
+// ── java keystore ────────────────────────────────────────────────────────────
+
+// A PKCS#12 keystore whose CA list carries another site's certificate and an
+// intermediate that did not issue this one.
+func TestAKeystoreEntryReportsEachLeafWithItsOwnChain(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	stray := mint(t, "Stray Intermediate", true, &root)
+	leaf := mint(t, "www.example.com", false, &inter)
+	other := mint(t, "other.example.com", false, &stray)
+
+	p12, err := pkcs12.Modern.Encode(leaf.key, leaf.cert, []*x509.Certificate{root.cert, other.cert, inter.cert}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tomcat.p12"), p12, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wantReported(t, collectKeystores(t, dir),
+		"www.example.com -> [Intermediate, Root]",
+		"other.example.com -> []",
+	)
+}
+
+// ── listener ─────────────────────────────────────────────────────────────────
+
+// A server misconfigured to send a stray certificate in its handshake. The
+// presented leaf is still the observation; the stray is not its chain.
+func TestAListenerSendingAStrayCertificateDoesNotPolluteTheChain(t *testing.T) {
+	root := mint(t, "Root", true, nil)
+	inter := mint(t, "Intermediate", true, &root)
+	leaf := mint(t, "served.example.com", false, &inter)
+	stray := mint(t, "stray.example.com", false, nil)
+
+	port := serveTLS(t, &tls.Config{Certificates: []tls.Certificate{{
+		Certificate: [][]byte{leaf.cert.Raw, stray.cert.Raw, inter.cert.Raw},
+		PrivateKey:  leaf.key,
+	}}})
+
+	wantReported(t, collectPorts(t, ListenerBounds{}, port), "served.example.com -> [Intermediate]")
+}
+
+// Nothing above is allowed to change what reaches the wire: a certificate is
+// still constructed from parsed DER, so a key in the same file never rides
+// along whichever certificate it is attached to.
+func TestSeveralLeavesBesideAKeyCarryNoKeyMaterial(t *testing.T) {
+	a := mint(t, "a.example.com", false, nil)
+	b := mint(t, "b.example.com", false, nil)
+	keyDER, err := x509.MarshalECPrivateKey(a.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := parse.EncodePEM([]*x509.Certificate{a.cert}) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})) +
+		parse.EncodePEM([]*x509.Certificate{b.cert})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "combined.pem"), []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := collectIn(t, dir)
+	wantReported(t, res, "a.example.com -> []", "b.example.com -> []")
+	for _, o := range res.Observations {
+		if parse.ContainsPrivateKey([]byte(o.CertificatePEM + o.ChainPEM)) {
+			t.Fatal("key material in an observation")
+		}
+		if !o.PrivateKeyPresent {
+			t.Error("the key in the file was not flagged")
+		}
+	}
+}

@@ -81,6 +81,14 @@ end-entity certificate is also located by *looking* for it rather than taking
 the first in the file, because bundles are concatenations and plenty of tools
 write the chain first.
 
+**Every end-entity certificate in a file is reported, each with its own
+chain.** A file holding several sites' certificates is several certificates, not
+one with the others as its chain. A chain holds only certificates from the same
+file (or keystore entry, configured chain file, or TLS handshake) that actually
+issued it — the subject matches its issuer *and* the signature verifies — leaf
+side first. A file of nothing but CA certificates that has a key beside it is
+reported as its first certificate, as before.
+
 ### Java keystores (`java_keystore`)
 
 **Invisible to every other collector.** A `.jks` is neither PEM nor DER, so a
