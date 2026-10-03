@@ -238,8 +238,10 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 	}
 
 	for _, entry := range entries {
-		leaf, chain, found := parse.Leaf(entry.Certificates)
-		if !found {
+		// Every end-entity certificate in the alias, each with only the issuers
+		// that signed it — see parse.Leaves.
+		found := parse.Leaves(entry.Certificates)
+		if len(found) == 0 {
 			// An alias holding only CA certificates is a trust anchor, not a
 			// deployment — and cacerts, which is on every host with a JDK, is
 			// a hundred and fifty of them. Reporting those would bury the
@@ -262,29 +264,38 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 			if !entry.HasPrivateKey || len(entry.Certificates) == 0 {
 				continue
 			}
-			leaf, chain = entry.Certificates[0], entry.Certificates[1:]
+			// The first certificate is the one the key entry is FOR: a
+			// PrivateKeyEntry stores its chain leaf first.
+			first := entry.Certificates[0]
+			found = []parse.LeafWithChain{{Leaf: first, Chain: parse.ChainFor(first, entry.Certificates)}}
 		}
-		res.Observations = append(res.Observations, Observation{
-			CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
-			ChainPEM:       parse.EncodePEM(chain),
-			Source:         SourceJavaKeystore,
-			// The alias, not just the file. It is what `keytool -delete -alias`
-			// takes, and on a store with six aliases it is the only thing that
-			// says which one is expiring.
-			Location: path + ":" + entry.Alias,
-			Binding: map[string]string{
-				"keystore": path,
-				"alias":    entry.Alias,
-				"format":   format,
-			},
-			PrivateKeyPresent: entry.HasPrivateKey,
-			// The key is INSIDE the keystore, so the keystore is where an
-			// operator has to go — there is no separate file to point at.
-			PrivateKeyLocation: keyLocation(path, entry.HasPrivateKey),
-			FileMode:           fileMode(info),
-			FileOwner:          fileOwner(info),
-			ObservedAt:         time.Now().UTC(),
-		})
+		for _, f := range found {
+			res.Observations = append(res.Observations, keystoreObservation(path, format, entry, f, info))
+		}
+	}
+}
+
+func keystoreObservation(path, format string, entry parse.KeystoreEntry, f parse.LeafWithChain, info fs.FileInfo) Observation {
+	return Observation{
+		CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
+		ChainPEM:       parse.EncodePEM(f.Chain),
+		Source:         SourceJavaKeystore,
+		// The alias, not just the file. It is what `keytool -delete -alias`
+		// takes, and on a store with six aliases it is the only thing that
+		// says which one is expiring.
+		Location: path + ":" + entry.Alias,
+		Binding: map[string]string{
+			"keystore": path,
+			"alias":    entry.Alias,
+			"format":   format,
+		},
+		PrivateKeyPresent: entry.HasPrivateKey,
+		// The key is INSIDE the keystore, so the keystore is where an
+		// operator has to go — there is no separate file to point at.
+		PrivateKeyLocation: keyLocation(path, entry.HasPrivateKey),
+		FileMode:           fileMode(info),
+		FileOwner:          fileOwner(info),
+		ObservedAt:         time.Now().UTC(),
 	}
 }
 

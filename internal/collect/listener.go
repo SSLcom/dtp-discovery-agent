@@ -286,10 +286,16 @@ func (c *Listener) probeOne(ctx context.Context, b ListenerBounds, target socket
 		}
 	}
 
+	// The first certificate presented IS the server's: TLS puts it there, and
+	// it is what a client checks the name against. The rest is filtered like any
+	// other chain — a server misconfigured to send a stray certificate (an old
+	// intermediate, another site's certificate pasted into a bundle) should not
+	// have it reported as part of this one's chain. Walking from the leaf
+	// upward keeps the presented leaf-to-root order.
 	leaf := certs[0]
 	return &Observation{
 		CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
-		ChainPEM:       parse.EncodePEM(certs[1:]),
+		ChainPEM:       parse.EncodePEM(parse.ChainFor(leaf, certs[1:])),
 		Source:         SourceListener,
 		Location:       target.dialAddress(),
 		Binding:        binding,

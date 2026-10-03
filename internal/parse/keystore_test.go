@@ -147,9 +147,9 @@ func TestATrustStoreHoldsNoDeployedCertificate(t *testing.T) {
 		}
 		all = append(all, entry.Certificates...)
 	}
-	// Both are real public roots, so Leaf has to report that there is nothing
+	// Both are real public roots, so Leaves has to report that there is nothing
 	// deployed here — which is what keeps a cacerts out of the portfolio.
-	if _, _, found := Leaf(all); found {
+	if found := Leaves(all); len(found) != 0 {
 		t.Error("a store of CA certificates is a list of issuers, not a deployment")
 	}
 

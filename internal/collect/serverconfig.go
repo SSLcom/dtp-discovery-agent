@@ -249,24 +249,39 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			continue
 		}
 
-		// A configured certificate is reported WHATEVER it holds. Unlike a file
-		// the agent merely came across, this one is what the site presents — so
-		// if someone has pointed ssl_certificate at a chain file, that is a
-		// finding rather than something to skip. The leaf is still preferred
-		// where there is one, because bundles are not reliably ordered.
-		leaf, chain, found := parse.Leaf(parsed.Certificates)
-		if !found {
-			leaf, chain = parsed.Certificates[0], parsed.Certificates[1:]
-		}
 		// Apache before 2.4.8 kept the intermediates in a separate file. Read
 		// it if the configuration named one: a chain the agent can see is a
 		// chain DTP can check, and a missing intermediate is its own outage.
+		//
+		// ITS CONTENTS ARE CANDIDATE ISSUERS, NOT THE CHAIN. A chain file is
+		// often a shared bundle of every intermediate the host has ever needed;
+		// appended wholesale, each site would carry all of them, including
+		// ones that did not issue it. Only those that signed their way into
+		// the chain are kept (parse.ChainFor).
+		var issuers []*x509.Certificate
 		if ref.Chain != "" {
 			if extra, err := os.ReadFile(ref.Chain); err == nil {
 				if chainCerts, err := parse.Certificates(extra); err == nil {
-					chain = append(chain, chainCerts.Certificates...)
+					issuers = chainCerts.Certificates
 				}
 			}
+		}
+
+		// A configured certificate is reported WHATEVER it holds. Unlike a file
+		// the agent merely came across, this one is what the site presents — so
+		// if someone has pointed ssl_certificate at a chain file, that is a
+		// finding rather than something to skip, and the first certificate in
+		// it is the one reported, as the server would load it. Where there are
+		// end-entity certificates they are preferred, because bundles are not
+		// reliably ordered — and EVERY one is reported, each with its own
+		// chain, so a second site's certificate in the same file is a
+		// certificate in the portfolio rather than an entry in this one's
+		// chain.
+		found := parse.Leaves(parsed.Certificates, issuers...)
+		if len(found) == 0 {
+			first := parsed.Certificates[0]
+			candidates := append(append([]*x509.Certificate{}, parsed.Certificates...), issuers...)
+			found = []parse.LeafWithChain{{Leaf: first, Chain: parse.ChainFor(first, candidates)}}
 		}
 
 		binding := map[string]string{
@@ -284,22 +299,24 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			binding["listen"] = strings.Join(host.Listen, " ")
 		}
 
-		res.Observations = append(res.Observations, Observation{
-			CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
-			ChainPEM:       parse.EncodePEM(chain),
-			Source:         SourceServerConfig,
-			Location:       host.location(),
-			Binding:        binding,
-			// The configuration TELLS us where the key is. That is better than
-			// the file collector's guess from a matching filename, and it is
-			// why this is worth recording here as well: a key nobody would have
-			// looked for is still a key sitting at mode 0644.
-			PrivateKeyPresent:  ref.Key != "" || parsed.HadPrivateKey,
-			PrivateKeyLocation: ref.Key,
-			FileMode:           fileModeOf(ref.Certificate),
-			FileOwner:          fileOwnerOf(ref.Certificate),
-			ObservedAt:         time.Now().UTC(),
-		})
+		for _, f := range found {
+			res.Observations = append(res.Observations, Observation{
+				CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
+				ChainPEM:       parse.EncodePEM(f.Chain),
+				Source:         SourceServerConfig,
+				Location:       host.location(),
+				Binding:        binding,
+				// The configuration TELLS us where the key is. That is better than
+				// the file collector's guess from a matching filename, and it is
+				// why this is worth recording here as well: a key nobody would have
+				// looked for is still a key sitting at mode 0644.
+				PrivateKeyPresent:  ref.Key != "" || parsed.HadPrivateKey,
+				PrivateKeyLocation: ref.Key,
+				FileMode:           fileModeOf(ref.Certificate),
+				FileOwner:          fileOwnerOf(ref.Certificate),
+				ObservedAt:         time.Now().UTC(),
+			})
+		}
 	}
 }
 
