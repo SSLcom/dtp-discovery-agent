@@ -161,12 +161,12 @@ func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen 
 		if err != nil || info.Size() > b.MaxFileBytes || info.Size() == 0 {
 			return nil
 		}
-		c.examine(path, info, res, examined)
+		c.examine(ctx, path, info, res, examined)
 		return nil
 	})
 }
 
-func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+func (c *FS) examine(ctx context.Context, path string, info fs.FileInfo, res *Result, examined map[string]bool) {
 	resolved, err := filepath.Abs(path)
 	if err != nil {
 		resolved = path
@@ -229,14 +229,13 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[st
 	// which of several CA certificates the key belongs to without reading the
 	// key, which this collector never does — with its chain filtered the same
 	// way.
-	found := parse.Leaves(parsed.Certificates)
-	if len(found) == 0 {
-		if keyPath == "" {
-			return
-		}
+	store := parse.NewStore(ctx, nil, parsed.Certificates)
+	found := store.Leaves()
+	if len(found) == 0 && keyPath != "" && !store.Shortfall().Interrupted {
 		first := parsed.Certificates[0]
-		found = []parse.LeafWithChain{{Leaf: first, Chain: parse.ChainFor(first, parsed.Certificates)}}
+		found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
 	}
+	noteShortfall(res, SourceFile, path, store.Shortfall())
 	for _, f := range found {
 		res.Observations = append(res.Observations, Observation{
 			CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),

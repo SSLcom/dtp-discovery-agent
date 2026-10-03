@@ -2,11 +2,14 @@ package collect
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fixtures are keytool's own output; see internal/parse/testdata/README.md.
@@ -340,5 +343,73 @@ func TestAKeystoreReachedThroughTwoRootsIsReportedOnce(t *testing.T) {
 			t.Errorf("location reported twice: %s", o.Location)
 		}
 		seen[o.Location] = true
+	}
+}
+
+// keystoreOfAliases writes a JKS of PrivateKeyEntries, one per chain, with a
+// dummy key blob — the reader steps over the key by its length, so the
+// certificates are all that matters here.
+func keystoreOfAliases(chains [][]*x509.Certificate) []byte {
+	var b []byte
+	u32 := func(v uint32) { b = binary.BigEndian.AppendUint32(b, v) }
+	utf := func(s string) {
+		b = binary.BigEndian.AppendUint16(b, uint16(len(s)))
+		b = append(b, s...)
+	}
+
+	u32(0xFEEDFEED) // magic
+	u32(2)          // version
+	u32(uint32(len(chains)))
+	for i, chain := range chains {
+		u32(1) // tag: private key
+		utf(fmt.Sprintf("alias%d", i))
+		b = append(b, make([]byte, 8)...) // creation date
+		u32(4)                            // key length
+		b = append(b, 0xDE, 0xAD, 0xBE, 0xEF)
+		u32(uint32(len(chain)))
+		for _, cert := range chain {
+			utf("X.509")
+			u32(uint32(len(cert.Raw)))
+			b = append(b, cert.Raw...)
+		}
+	}
+	return append(b, make([]byte, 20)...) // trailing digest
+}
+
+// A keystore split into many aliases, each a separate store comfortably inside
+// its own limits, shares ONE budget — otherwise forty aliases cost forty times
+// what one file may. Every certificate is still reported, and the keystore is
+// named once, not once per alias.
+func TestTheAliasesOfOneKeystoreShareItsBudget(t *testing.T) {
+	absent := mint(t, "Collide CA", true, nil)
+	var chains [][]*x509.Certificate
+	for a := 0; a < 40; a++ {
+		var chain []*x509.Certificate
+		for i := 0; i < 15; i++ {
+			chain = append(chain, mint(t, fmt.Sprintf("leaf%d-%d.example.com", a, i), false, &absent).cert)
+		}
+		for i := 0; i < 15; i++ {
+			chain = append(chain, mint(t, "Collide CA", true, nil).cert)
+		}
+		chains = append(chains, chain)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.jks")
+	if err := os.WriteFile(path, keystoreOfAliases(chains), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	res := collectKeystores(t, dir)
+	t.Logf("40 aliases of 15 leaves and 15 decoys: %v", time.Since(start))
+
+	if len(res.Observations) != 40*15 {
+		t.Errorf("reported %d, want every leaf of every alias, %d", len(res.Observations), 40*15)
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Location != path {
+		t.Errorf("errors %+v, want exactly one, naming the keystore", res.Errors)
+	}
+	if !res.Completed {
+		t.Error("a chain cut short loses no certificate, so the sweep should stand")
 	}
 }

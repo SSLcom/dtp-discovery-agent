@@ -89,6 +89,16 @@ issued it — the subject matches its issuer *and* the signature verifies — le
 side first. A file of nothing but CA certificates that has a key beside it is
 reported as its first certificate, as before.
 
+**What one file can cost is bounded**, because a file under a scanned root may
+have been written by anyone who can write there. Signature checks are made once
+per certificate pair and budgeted per file (about a quarter of a second of
+work), a store reports at most 256 end-entity certificates and indexes at most
+4096 certificates, and a chain stops at 10. Running out of budget still reports
+every certificate, some with a shorter chain, and names the file in the run's
+errors; exceeding a count names the file too and leaves the `file` (or
+`java_keystore`) sweep incomplete, so nothing it missed is marked gone. A stop
+request interrupts a file part-way rather than waiting for it.
+
 ### Java keystores (`java_keystore`)
 
 **Invisible to every other collector.** A `.jks` is neither PEM nor DER, so a

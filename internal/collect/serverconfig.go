@@ -189,7 +189,7 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 				res.Errors = append(res.Errors, problem)
 			}
 			for _, host := range hosts {
-				c.record(host, &res)
+				c.record(ctx, host, &res)
 			}
 		}
 	}
@@ -208,7 +208,7 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 
 // record turns one configured site into observations, reading each certificate
 // the configuration pointed at.
-func (c *ServerConfig) record(host vhost, res *Result) {
+func (c *ServerConfig) record(ctx context.Context, host vhost, res *Result) {
 	for _, ref := range host.Certs {
 		data, err := os.ReadFile(ref.Certificate)
 		if err != nil {
@@ -283,8 +283,9 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 		// The chain is what the rest of the file and the chain file actually
 		// issued, not everything that happened to be in them (parse.ChainFor).
 		served := parsed.Certificates[0]
-		candidates := append(append([]*x509.Certificate{}, parsed.Certificates[1:]...), issuers...)
-		chain := parse.ChainFor(served, candidates)
+		store := parse.NewStore(ctx, nil, parsed.Certificates[1:], issuers...)
+		chain := store.ChainFor(served)
+		noteShortfall(res, SourceServerConfig, ref.Certificate, store.Shortfall())
 
 		binding := map[string]string{
 			"server":           host.Server,

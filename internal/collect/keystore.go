@@ -189,12 +189,12 @@ func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res
 		if err != nil || info.Size() == 0 || info.Size() > b.MaxFileBytes {
 			return nil
 		}
-		c.examine(path, info, res, examined)
+		c.examine(ctx, path, info, res, examined)
 		return nil
 	})
 }
 
-func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+func (c *Keystores) examine(ctx context.Context, path string, info fs.FileInfo, res *Result, examined map[string]bool) {
 	// Measured end to end against a live DTP: a Tomcat keystore under
 	// /opt/tomcat/conf was reported TWICE, six observations for three aliases,
 	// because two default roots glob to the same directory. The server's upsert
@@ -237,11 +237,25 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 		})
 	}
 
+	// One budget for the whole file, and one note of what it cost: the aliases
+	// are separate stores, but one file somebody wrote.
+	budget := parse.NewBudget()
+	var short parse.Shortfall
+	defer func() { noteShortfall(res, SourceJavaKeystore, path, short) }()
+
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			// Stopped part-way: the aliases after this one were never looked
+			// at, so they must not be treated as removed.
+			res.Completed = false
+			return
+		}
 		// Every end-entity certificate in the alias, each with only the issuers
-		// that signed it — see parse.Leaves.
-		found := parse.Leaves(entry.Certificates)
-		if len(found) == 0 {
+		// that signed it — see parse.Store.Leaves.
+		store := parse.NewStore(ctx, budget, entry.Certificates)
+		found := store.Leaves()
+		short = short.Add(store.Shortfall())
+		if len(found) == 0 && !store.Shortfall().Interrupted {
 			// An alias holding only CA certificates is a trust anchor, not a
 			// deployment — and cacerts, which is on every host with a JDK, is
 			// a hundred and fifty of them. Reporting those would bury the
@@ -267,7 +281,7 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 			// The first certificate is the one the key entry is FOR: a
 			// PrivateKeyEntry stores its chain leaf first.
 			first := entry.Certificates[0]
-			found = []parse.LeafWithChain{{Leaf: first, Chain: parse.ChainFor(first, entry.Certificates)}}
+			found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
 		}
 		for _, f := range found {
 			res.Observations = append(res.Observations, keystoreObservation(path, format, entry, f, info))

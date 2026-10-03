@@ -1,6 +1,7 @@
 package parse
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -85,7 +86,7 @@ func TestEveryLeafInAFileIsReportedWithOnlyItsOwnIssuers(t *testing.T) {
 	b := mint(t, "b.example.com", false, &inter)
 	c := mint(t, "c.example.com", false, &other)
 
-	got := Leaves([]*x509.Certificate{a.cert, b.cert, c.cert, inter.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{a.cert, b.cert, c.cert, inter.cert})
 	if len(got) != 3 {
 		t.Fatalf("got %d leaves, want 3", len(got))
 	}
@@ -106,7 +107,7 @@ func TestARootFirstBundleIsReportedLeafToRoot(t *testing.T) {
 	inter := mint(t, "Intermediate", true, &root)
 	leaf := mint(t, "www.example.com", false, &inter)
 
-	got := Leaves([]*x509.Certificate{root.cert, inter.cert, leaf.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{root.cert, inter.cert, leaf.cert})
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1", len(got))
 	}
@@ -121,7 +122,7 @@ func TestASameNamedCAWithADifferentKeyIsNotTheIssuer(t *testing.T) {
 	impostor := mint(t, "Issuing CA", true, nil)
 	leaf := mint(t, "www.example.com", false, &real)
 
-	got := Leaves([]*x509.Certificate{leaf.cert, impostor.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert, impostor.cert})
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1", len(got))
 	}
@@ -129,7 +130,7 @@ func TestASameNamedCAWithADifferentKeyIsNotTheIssuer(t *testing.T) {
 
 	// And with both present, the one that signed it is chosen whichever comes
 	// first.
-	got = Leaves([]*x509.Certificate{leaf.cert, impostor.cert, real.cert})
+	got = Leaves(context.Background(), []*x509.Certificate{leaf.cert, impostor.cert, real.cert})
 	sameChain(t, "both present", got[0].Chain, real.cert)
 }
 
@@ -137,7 +138,7 @@ func TestALeafWithNoIssuerPresentHasAnEmptyChain(t *testing.T) {
 	ca := mint(t, "Absent CA", true, nil)
 	leaf := mint(t, "www.example.com", false, &ca)
 
-	got := Leaves([]*x509.Certificate{leaf.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert})
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1", len(got))
 	}
@@ -153,18 +154,18 @@ func TestAFileOfOnlyCACertificatesHasNoLeaves(t *testing.T) {
 	unrelated := mint(t, "Unrelated Root", true, nil)
 	all := []*x509.Certificate{inter.cert, unrelated.cert, root.cert}
 
-	if got := Leaves(all); len(got) != 0 {
+	if got := Leaves(context.Background(), all); len(got) != 0 {
 		t.Fatalf("a store of CA certificates yielded %d leaves", len(got))
 	}
-	sameChain(t, "first of a CA bundle", ChainFor(all[0], all), root.cert)
-	sameChain(t, "self-signed root", ChainFor(unrelated.cert, all))
+	sameChain(t, "first of a CA bundle", ChainFor(context.Background(), all[0], all), root.cert)
+	sameChain(t, "self-signed root", ChainFor(context.Background(), unrelated.cert, all))
 }
 
 func TestADuplicatedLeafIsReportedOnce(t *testing.T) {
 	ca := mint(t, "Issuing CA", true, nil)
 	leaf := mint(t, "www.example.com", false, &ca)
 
-	got := Leaves([]*x509.Certificate{leaf.cert, ca.cert, leaf.cert, ca.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert, ca.cert, leaf.cert, ca.cert})
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1", len(got))
 	}
@@ -179,7 +180,7 @@ func TestALeafIsNeverFiledAsAnIssuer(t *testing.T) {
 	// permits — the point is what the reader concludes.
 	leaf := mint(t, "www.example.com", false, &notACA)
 
-	got := Leaves([]*x509.Certificate{leaf.cert, notACA.cert})
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert, notACA.cert})
 	if len(got) != 2 {
 		t.Fatalf("got %d leaves, want 2", len(got))
 	}
@@ -194,7 +195,7 @@ func TestExtraIssuersAreCandidatesNotChain(t *testing.T) {
 	stray := mint(t, "Stray Intermediate", true, &root)
 	leaf := mint(t, "www.example.com", false, &inter)
 
-	got := Leaves([]*x509.Certificate{leaf.cert}, stray.cert, root.cert, inter.cert)
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert}, stray.cert, root.cert, inter.cert)
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1 — an extra issuer is never itself a leaf", len(got))
 	}
@@ -228,7 +229,7 @@ func TestACrossSigningCycleTerminates(t *testing.T) {
 	bByA := parse(x509.CreateCertificate(rand.Reader, tmpl(nameB), tmpl(nameA), &keyB.PublicKey, keyA))
 	leaf := mint(t, "www.example.com", false, &issuer{cert: aByB, key: keyA})
 
-	got := Leaves([]*x509.Certificate{leaf.cert, aByB, bByA})
+	got := Leaves(context.Background(), []*x509.Certificate{leaf.cert, aByB, bByA})
 	if len(got) != 1 {
 		t.Fatalf("got %d leaves, want 1", len(got))
 	}

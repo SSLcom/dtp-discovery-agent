@@ -8,9 +8,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -167,6 +169,67 @@ func TestACABundleWithAKeyReportsItsFirstCertificateWithAFilteredChain(t *testin
 	writeKey(t, filepath.Join(dir, "ca.key"))
 
 	wantReported(t, collectIn(t, dir), "Intermediate -> [Root]")
+}
+
+// A file somebody planted under a scan root — leaves that all name one issuer
+// and decoy CAs that all carry that name, none of which signed them — cost
+// seconds per file before the budget, and stalled every source after it. Now
+// it costs a bounded amount, every certificate in it is still reported, the
+// shortfall is named, and the real site beside it is untouched.
+func TestAPlantedFileIsBoundedAndTheSiteBesideItIsNot(t *testing.T) {
+	absent := mint(t, "Collide CA", true, nil)
+	var planted []*x509.Certificate
+	for i := 0; i < 80; i++ {
+		planted = append(planted, mint(t, fmt.Sprintf("leaf%d.example.com", i), false, &absent).cert)
+	}
+	for i := 0; i < 80; i++ {
+		planted = append(planted, mint(t, "Collide CA", true, nil).cert)
+	}
+	inter := mint(t, "Intermediate", true, nil)
+	site := mint(t, "www.example.com", false, &inter)
+
+	dir := t.TempDir()
+	writePEM(t, filepath.Join(dir, "planted.pem"), planted...)
+	writePEM(t, filepath.Join(dir, "site.pem"), site.cert, inter.cert)
+
+	res := collectIn(t, dir)
+	got := reported(t, res)
+	if len(got) != 81 {
+		t.Fatalf("reported %d certificates, want 81 — every planted leaf and the site", len(got))
+	}
+	if !slices.Contains(got, "www.example.com -> [Intermediate]") {
+		t.Errorf("the site beside the planted file lost its chain: %v", got)
+	}
+	if !res.Completed {
+		t.Error("a chain cut short loses no certificate, so the sweep should stand")
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Location != filepath.Join(dir, "planted.pem") ||
+		!strings.Contains(res.Errors[0].Error, "possible issuers") {
+		t.Errorf("errors %+v, want one naming the planted file", res.Errors)
+	}
+}
+
+// More end-entity certificates than one store reports: the excess is unseen,
+// so the sweep may not be used to mark anything absent, and the file is named.
+func TestAFileOverTheLeafLimitSpoilsTheSweep(t *testing.T) {
+	ca := mint(t, "CA", true, nil)
+	var certs []*x509.Certificate
+	for i := 0; i < parse.MaxLeavesPerStore+1; i++ {
+		certs = append(certs, mint(t, fmt.Sprintf("site%d.example.com", i), false, &ca).cert)
+	}
+	dir := t.TempDir()
+	writePEM(t, filepath.Join(dir, "many.pem"), certs...)
+
+	res := collectIn(t, dir)
+	if len(res.Observations) != parse.MaxLeavesPerStore {
+		t.Errorf("reported %d, want the limit, %d", len(res.Observations), parse.MaxLeavesPerStore)
+	}
+	if res.Completed {
+		t.Error("certificates went unreported, yet the sweep claims to be complete")
+	}
+	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Error, "were not examined") {
+		t.Errorf("errors %+v, want one saying the rest were not examined", res.Errors)
+	}
 }
 
 // ── server config ────────────────────────────────────────────────────────────

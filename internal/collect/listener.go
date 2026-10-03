@@ -295,7 +295,7 @@ func (c *Listener) probeOne(ctx context.Context, b ListenerBounds, target socket
 	leaf := certs[0]
 	return &Observation{
 		CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
-		ChainPEM:       parse.EncodePEM(parse.ChainFor(leaf, certs[1:])),
+		ChainPEM:       parse.EncodePEM(parse.ChainFor(ctx, leaf, certs[1:])),
 		Source:         SourceListener,
 		Location:       target.dialAddress(),
 		Binding:        binding,

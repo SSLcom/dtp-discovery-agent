@@ -1,6 +1,7 @@
 package parse
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -149,7 +150,7 @@ func TestATrustStoreHoldsNoDeployedCertificate(t *testing.T) {
 	}
 	// Both are real public roots, so Leaves has to report that there is nothing
 	// deployed here — which is what keeps a cacerts out of the portfolio.
-	if found := Leaves(all); len(found) != 0 {
+	if found := Leaves(context.Background(), all); len(found) != 0 {
 		t.Error("a store of CA certificates is a list of issuers, not a deployment")
 	}
 
