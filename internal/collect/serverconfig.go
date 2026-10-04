@@ -289,7 +289,16 @@ func (c *ServerConfig) record(ctx context.Context, host vhost, res *Result) {
 		served := parsed.Certificates[0]
 		store := parse.NewStore(ctx, nil, parsed.Certificates[1:], issuers...)
 		chain := store.ChainFor(served)
-		noteShortfall(res, SourceServerConfig, ref.Certificate, store.Shortfall())
+		// A truncated store here lost CHAIN CANDIDATES, never a certificate this
+		// source reports: it only ever reports the served one, above. So it is
+		// a shorter chain, not an unseen deployment, and must not clear
+		// Completed — that would stop the server retiring this host's old
+		// placements because a chain file was long.
+		short := store.Shortfall()
+		if short.Truncated {
+			short.Truncated, short.OutOfBudget = false, true
+		}
+		noteShortfall(res, SourceServerConfig, ref.Certificate, short)
 
 		binding := map[string]string{
 			"server":           host.Server,

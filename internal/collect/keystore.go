@@ -285,6 +285,10 @@ func (c *Keystores) examine(ctx context.Context, path string, info fs.FileInfo, 
 			// PrivateKeyEntry stores its chain leaf first.
 			first := entry.Certificates[0]
 			found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
+			// Taken again AFTER the walk: the snapshot above predates it, so a
+			// budget, depth or cancellation that cut THIS chain would otherwise
+			// never reach noteShortfall. Add is an OR, so the repeat is free.
+			short = short.Add(store.Shortfall())
 		}
 		for _, f := range found {
 			if !res.observe(ctx, keystoreObservation(path, format, entry, f, info)) {

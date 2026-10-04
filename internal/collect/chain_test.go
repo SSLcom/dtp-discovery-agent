@@ -286,7 +286,75 @@ http {
 	}
 }
 
+// A configured file can hold more candidates than a store keeps, but server
+// config only ever reports the SERVED certificate — so the excess can shorten
+// its chain and never hides a deployment. The source stays complete, or DTP
+// would stop retiring this host's old placements over a long chain file.
+func TestAnOversizedConfiguredFileShortensTheChainButKeepsTheSweepComplete(t *testing.T) {
+	ca := mint(t, "CA", true, nil)
+	certs := []*x509.Certificate{mint(t, "a.example.com", false, &ca).cert}
+	for i := 0; i < parse.MaxCertificatesPerStore+1; i++ {
+		certs = append(certs, mint(t, fmt.Sprintf("other%d.example.com", i), false, &ca).cert)
+	}
+	dir := tree(t, map[string]string{
+		"nginx.conf": `
+http {
+    server {
+        listen 443 ssl;
+        server_name a.example.com;
+        ssl_certificate {{root}}/ssl/big.pem;
+    }
+}
+`,
+	})
+	writePEM(t, filepath.Join(dir, "ssl/big.pem"), certs...)
+
+	res := collectNginx(t, dir, "nginx.conf")
+	if o := onlyObservation(t, res); o.Binding["server_name"] != "a.example.com" {
+		t.Errorf("binding = %v", o.Binding)
+	}
+	if !res.Completed {
+		t.Error("only chain candidates were dropped, yet the sweep claims certificates went unseen")
+	}
+	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Error, "shorter chain") {
+		t.Errorf("errors %+v, want one saying a chain was shortened", res.Errors)
+	}
+}
+
 // ── java keystore ────────────────────────────────────────────────────────────
+
+// A key entry holding only CA certificates is reported as its first one, with
+// a chain walked AFTER Leaves — so a shortfall in that walk has to be taken
+// then, not from the snapshot before it, or the cut chain goes up unnamed.
+func TestAKeyEntrysFallbackChainShortfallIsNamed(t *testing.T) {
+	cas := []minted{mint(t, "CA 0", true, nil)}
+	for i := 1; i <= parse.MaxChainDepth+2; i++ {
+		parent := cas[i-1]
+		cas = append(cas, mint(t, fmt.Sprintf("CA %d", i), true, &parent))
+	}
+	bottom := cas[len(cas)-1]
+	var rest []*x509.Certificate
+	for i := len(cas) - 2; i >= 0; i-- {
+		rest = append(rest, cas[i].cert)
+	}
+	p12, err := pkcs12.Modern.Encode(bottom.key, bottom.cert, rest, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ca.p12"), p12, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := collectKeystores(t, dir)
+	if len(res.Observations) != 1 {
+		t.Fatalf("reported %d observations, want the key entry's own certificate", len(res.Observations))
+	}
+	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Error, "chain deeper") {
+		t.Errorf("errors %+v, want one naming the shortened chain", res.Errors)
+	}
+}
+
 
 // A PKCS#12 keystore whose CA list carries another site's certificate and an
 // intermediate that did not issue this one.
