@@ -4,7 +4,10 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"github.com/SSLcom/dtp-discovery-agent/internal/parse"
 )
 
 // Source values DTP understands. Anything a collector reports outside this set
@@ -65,6 +68,8 @@ type Result struct {
 	Observations []Observation
 	Errors       []Error
 	Completed    bool
+
+	capped bool // the run's limit refused an observation; see observe
 }
 
 // Collector is one way of finding certificates on a host.
@@ -75,4 +80,35 @@ type Collector interface {
 	// collector that fails has still partly succeeded, and what it did find is
 	// worth reporting as long as Completed says not to trust its silence.
 	Collect(ctx context.Context) Result
+}
+
+// noteShortfall records what a certificate store's limits left undone (see
+// parse.Store), once per file.
+//
+// A store cut short is a FINDING, not a silence: the file is there, it was read
+// partly, and a member looking at a host where something seems missing needs
+// to be told which file and why. Whether the sweep still counts as complete
+// depends on what was lost. Certificates never looked at mean it does not — a
+// later run must not conclude they were removed — while a chain reported
+// shorter than the file could prove loses no certificate, and leaves it
+// standing.
+func noteShortfall(res *Result, source, location string, short parse.Shortfall) {
+	if short.Interrupted {
+		res.Completed = false // The walk reports the cancellation itself.
+	}
+	if short.Truncated {
+		res.Completed = false
+		res.Errors = append(res.Errors, Error{
+			Collector: source, Location: location,
+			Error: fmt.Sprintf("holds more than %d certificates or %d end-entity certificates in one store; the rest were not examined",
+				parse.MaxCertificatesPerStore, parse.MaxLeavesPerStore),
+		})
+	}
+	if short.OutOfBudget || short.TooDeep {
+		res.Errors = append(res.Errors, Error{
+			Collector: source, Location: location,
+			Error: fmt.Sprintf("holds more possible issuers than the agent will check signatures for, or a chain deeper than %d; every certificate was reported, some with a shorter chain than the file holds",
+				parse.MaxChainDepth),
+		})
+	}
 }

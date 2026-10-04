@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/SSLcom/dtp-discovery-agent/internal/collect"
 	"github.com/SSLcom/dtp-discovery-agent/internal/state"
 	"github.com/SSLcom/dtp-discovery-agent/internal/transport"
 )
@@ -93,6 +94,12 @@ func reportOnce(ctx context.Context, dir string, override, disabled []string, on
 	observed := 0
 	for _, r := range results {
 		observed += len(r.Observations)
+	}
+	if collect.ReachedRunLimit(results) {
+		// Also in the run's collector errors, where a member sees it; this is
+		// for whoever reads this host's log wondering why the count is round.
+		out.warn("warning: this scan reached its limit of %d certificates (or %d MiB of them); the rest were not reported, and nothing they hold will be marked absent",
+			collect.MaxObservationsPerRun, collect.MaxObservationBytesPerRun>>20)
 	}
 
 	resp, err := transport.Report(ctx, client, runID, started, results)

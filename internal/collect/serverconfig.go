@@ -189,7 +189,7 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 				res.Errors = append(res.Errors, problem)
 			}
 			for _, host := range hosts {
-				c.record(host, &res)
+				c.record(ctx, host, &res)
 			}
 		}
 	}
@@ -198,7 +198,11 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 	// a site's certificate is not in its configuration file but in HTTP.sys and
 	// the certificate store, so there is no path to open and parse.
 	observations, problems, complete := iisObservations()
-	res.Observations = append(res.Observations, observations...)
+	for _, o := range observations {
+		if !res.observe(ctx, o) {
+			break
+		}
+	}
 	res.Errors = append(res.Errors, problems...)
 	if !complete {
 		res.Completed = false
@@ -208,7 +212,7 @@ func (c *ServerConfig) Collect(ctx context.Context) Result {
 
 // record turns one configured site into observations, reading each certificate
 // the configuration pointed at.
-func (c *ServerConfig) record(host vhost, res *Result) {
+func (c *ServerConfig) record(ctx context.Context, host vhost, res *Result) {
 	for _, ref := range host.Certs {
 		data, err := os.ReadFile(ref.Certificate)
 		if err != nil {
@@ -249,25 +253,52 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			continue
 		}
 
-		// A configured certificate is reported WHATEVER it holds. Unlike a file
-		// the agent merely came across, this one is what the site presents — so
-		// if someone has pointed ssl_certificate at a chain file, that is a
-		// finding rather than something to skip. The leaf is still preferred
-		// where there is one, because bundles are not reliably ordered.
-		leaf, chain, found := parse.Leaf(parsed.Certificates)
-		if !found {
-			leaf, chain = parsed.Certificates[0], parsed.Certificates[1:]
-		}
 		// Apache before 2.4.8 kept the intermediates in a separate file. Read
 		// it if the configuration named one: a chain the agent can see is a
 		// chain DTP can check, and a missing intermediate is its own outage.
+		//
+		// ITS CONTENTS ARE CANDIDATE ISSUERS, NOT THE CHAIN. A chain file is
+		// often a shared bundle of every intermediate the host has ever needed;
+		// appended wholesale, each site would carry all of them, including
+		// ones that did not issue it. Only those that signed their way into
+		// the chain are kept (parse.ChainFor).
+		var issuers []*x509.Certificate
 		if ref.Chain != "" {
 			if extra, err := os.ReadFile(ref.Chain); err == nil {
 				if chainCerts, err := parse.Certificates(extra); err == nil {
-					chain = append(chain, chainCerts.Certificates...)
+					issuers = chainCerts.Certificates
 				}
 			}
 		}
+
+		// THE SERVED CERTIFICATE, AND ONLY IT. nginx and Apache both serve the
+		// FIRST certificate in the configured file and send the rest as its
+		// chain — a file whose first certificate is not the one the key opens
+		// fails to load, so on a running server the first is the leaf. That
+		// holds whatever it is: if someone has pointed ssl_certificate at a
+		// chain file, that is a finding rather than something to skip.
+		//
+		// A binding is a claim that THIS SITE PRESENTS THIS CERTIFICATE, so it
+		// is not attached to anything else in the file. A second site's
+		// certificate pasted into the same file is not served by this site;
+		// it is reported by the file collector when the file sits under a scan
+		// root, with no site binding — which is what is true of it.
+		//
+		// The chain is what the rest of the file and the chain file actually
+		// issued, not everything that happened to be in them (parse.ChainFor).
+		served := parsed.Certificates[0]
+		store := parse.NewStore(ctx, nil, parsed.Certificates[1:], issuers...)
+		chain := store.ChainFor(served)
+		// A truncated store here lost CHAIN CANDIDATES, never a certificate this
+		// source reports: it only ever reports the served one, above. So it is
+		// a shorter chain, not an unseen deployment, and must not clear
+		// Completed — that would stop the server retiring this host's old
+		// placements because a chain file was long.
+		short := store.Shortfall()
+		if short.Truncated {
+			short.Truncated, short.OutOfBudget = false, true
+		}
+		noteShortfall(res, SourceServerConfig, ref.Certificate, short)
 
 		binding := map[string]string{
 			"server":           host.Server,
@@ -284,8 +315,8 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			binding["listen"] = strings.Join(host.Listen, " ")
 		}
 
-		res.Observations = append(res.Observations, Observation{
-			CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
+		recorded := res.observe(ctx, Observation{
+			CertificatePEM: parse.EncodePEM([]*x509.Certificate{served}),
 			ChainPEM:       parse.EncodePEM(chain),
 			Source:         SourceServerConfig,
 			Location:       host.location(),
@@ -300,6 +331,9 @@ func (c *ServerConfig) record(host vhost, res *Result) {
 			FileOwner:          fileOwnerOf(ref.Certificate),
 			ObservedAt:         time.Now().UTC(),
 		})
+		if !recorded {
+			return
+		}
 	}
 }
 

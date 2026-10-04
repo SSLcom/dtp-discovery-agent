@@ -16,6 +16,8 @@
 package e2e
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,6 +115,7 @@ func TestTheWholeThing(t *testing.T) {
 	assertFindings(t, obs, hostRoot)
 	assertNoKeyMaterialOnTheWire(t, server)
 	assertEachPlacementOnce(t, obs)
+	assertEveryLeafInAFileIsReported(t, obs)
 
 	// ── revoked: it stops ────────────────────────────────────────────────────
 	before := len(server.observations())
@@ -215,6 +218,60 @@ func assertEachPlacementOnce(t *testing.T, obs []observation) {
 			location, _, _ := strings.Cut(rest, "|")
 			t.Errorf("reported %d times, and a member reads that number: %s %s", n, source, location)
 		}
+	}
+}
+
+// assertEveryLeafInAFileIsReported is the v0.4.0 bug. A .pem holding several
+// sites' certificates was reported as ONE certificate, with the others sent as
+// its "chain" — never in the portfolio, never warned about before they expired.
+// And every chain carries only what issued that certificate.
+func assertEveryLeafInAFileIsReported(t *testing.T, obs []observation) {
+	t.Helper()
+	got := map[string][]string{}
+	for _, o := range obs {
+		if o.Source != "file" || !strings.HasSuffix(filepath.ToSlash(o.Location), "ssl/sites.pem") {
+			continue
+		}
+		leaf := commonNames(t, o.CertificatePEM)
+		if len(leaf) != 1 {
+			t.Fatalf("an observation of sites.pem carried %d certificates", len(leaf))
+		}
+		if _, dup := got[leaf[0]]; dup {
+			t.Errorf("%s was reported twice from one file", leaf[0])
+		}
+		got[leaf[0]] = commonNames(t, o.ChainPEM)
+	}
+	if len(got) != len(sitesInOneFile) {
+		t.Errorf("sites.pem holds %d sites' certificates and %d were reported: %v", len(sitesInOneFile), len(got), got)
+	}
+	for site, wantChain := range sitesInOneFile {
+		chain, ok := got[site]
+		if !ok {
+			t.Errorf("%s is in sites.pem and was never reported as a certificate", site)
+			continue
+		}
+		if strings.Join(chain, ", ") != strings.Join(wantChain, ", ") {
+			t.Errorf("%s arrived with chain %v, want %v", site, chain, wantChain)
+		}
+	}
+}
+
+// commonNames reads PEM as the server would, in order.
+func commonNames(t *testing.T, pemText string) []string {
+	t.Helper()
+	var out []string
+	rest := []byte(pemText)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return out
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("the server received an unparsable certificate: %v", err)
+		}
+		out = append(out, cert.Subject.CommonName)
 	}
 }
 

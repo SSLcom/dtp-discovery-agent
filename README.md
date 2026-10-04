@@ -81,6 +81,34 @@ end-entity certificate is also located by *looking* for it rather than taking
 the first in the file, because bundles are concatenations and plenty of tools
 write the chain first.
 
+**Every end-entity certificate in a file is reported, each with its own
+chain.** A file holding several sites' certificates is several certificates, not
+one with the others as its chain. A chain holds only certificates from the same
+file (or keystore entry, configured chain file, or TLS handshake) that actually
+issued it — the subject matches its issuer *and* the signature verifies — leaf
+side first. Where several could have issued it (one CA key under a self-signed
+root and a cross-signed copy), the one valid now is taken, then the
+self-signed root, then the earlier in the file. A certificate with no
+basicConstraints that signed another one in the same file — a v1 root, a legacy
+intermediate — is a CA, not a site. DTP applies the same rules to an uploaded
+bundle. A file of nothing but CA certificates that has a key beside it is
+reported as its first certificate, as before.
+
+**What one file can cost is bounded**, because a file under a scanned root may
+have been written by anyone who can write there. Signature checks are made once
+per certificate pair and budgeted per file (about a quarter of a second of
+work), a store reports at most 256 end-entity certificates and indexes at most
+4096 certificates, and a chain stops at 10. Running out of budget still reports
+every certificate, some with a shorter chain, and names the file in the run's
+errors; exceeding a count names the file too and leaves the `file` (or
+`java_keystore`) sweep incomplete, so nothing it missed is marked gone. A stop
+request interrupts a file part-way rather than waiting for it.
+
+**A whole run is bounded too**: at most 20,000 certificates, or 128 MiB of them
+with their chains, across every source. Past that the scan stops collecting,
+the source it was in and every source after it are reported incomplete with
+the reason in the run's errors, and the agent's log says so.
+
 ### Java keystores (`java_keystore`)
 
 **Invisible to every other collector.** A `.jks` is neither PEM nor DER, so a

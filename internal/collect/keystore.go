@@ -189,12 +189,15 @@ func (c *Keystores) walk(ctx context.Context, root string, b KeystoreBounds, res
 		if err != nil || info.Size() == 0 || info.Size() > b.MaxFileBytes {
 			return nil
 		}
-		c.examine(path, info, res, examined)
+		c.examine(ctx, path, info, res, examined)
+		if runFull(ctx) {
+			return filepath.SkipAll
+		}
 		return nil
 	})
 }
 
-func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+func (c *Keystores) examine(ctx context.Context, path string, info fs.FileInfo, res *Result, examined map[string]bool) {
 	// Measured end to end against a live DTP: a Tomcat keystore under
 	// /opt/tomcat/conf was reported TWICE, six observations for three aliases,
 	// because two default roots glob to the same directory. The server's upsert
@@ -237,9 +240,25 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 		})
 	}
 
+	// One budget for the whole file, and one note of what it cost: the aliases
+	// are separate stores, but one file somebody wrote.
+	budget := parse.NewBudget()
+	var short parse.Shortfall
+	defer func() { noteShortfall(res, SourceJavaKeystore, path, short) }()
+
 	for _, entry := range entries {
-		leaf, chain, found := parse.Leaf(entry.Certificates)
-		if !found {
+		if ctx.Err() != nil {
+			// Stopped part-way: the aliases after this one were never looked
+			// at, so they must not be treated as removed.
+			res.Completed = false
+			return
+		}
+		// Every end-entity certificate in the alias, each with only the issuers
+		// that signed it — see parse.Store.Leaves.
+		store := parse.NewStore(ctx, budget, entry.Certificates)
+		found := store.Leaves()
+		short = short.Add(store.Shortfall())
+		if len(found) == 0 && !store.Shortfall().Interrupted {
 			// An alias holding only CA certificates is a trust anchor, not a
 			// deployment — and cacerts, which is on every host with a JDK, is
 			// a hundred and fifty of them. Reporting those would bury the
@@ -262,29 +281,44 @@ func (c *Keystores) examine(path string, info fs.FileInfo, res *Result, examined
 			if !entry.HasPrivateKey || len(entry.Certificates) == 0 {
 				continue
 			}
-			leaf, chain = entry.Certificates[0], entry.Certificates[1:]
+			// The first certificate is the one the key entry is FOR: a
+			// PrivateKeyEntry stores its chain leaf first.
+			first := entry.Certificates[0]
+			found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
+			// Taken again AFTER the walk: the snapshot above predates it, so a
+			// budget, depth or cancellation that cut THIS chain would otherwise
+			// never reach noteShortfall. Add is an OR, so the repeat is free.
+			short = short.Add(store.Shortfall())
 		}
-		res.Observations = append(res.Observations, Observation{
-			CertificatePEM: parse.EncodePEM([]*x509.Certificate{leaf}),
-			ChainPEM:       parse.EncodePEM(chain),
-			Source:         SourceJavaKeystore,
-			// The alias, not just the file. It is what `keytool -delete -alias`
-			// takes, and on a store with six aliases it is the only thing that
-			// says which one is expiring.
-			Location: path + ":" + entry.Alias,
-			Binding: map[string]string{
-				"keystore": path,
-				"alias":    entry.Alias,
-				"format":   format,
-			},
-			PrivateKeyPresent: entry.HasPrivateKey,
-			// The key is INSIDE the keystore, so the keystore is where an
-			// operator has to go — there is no separate file to point at.
-			PrivateKeyLocation: keyLocation(path, entry.HasPrivateKey),
-			FileMode:           fileMode(info),
-			FileOwner:          fileOwner(info),
-			ObservedAt:         time.Now().UTC(),
-		})
+		for _, f := range found {
+			if !res.observe(ctx, keystoreObservation(path, format, entry, f, info)) {
+				return
+			}
+		}
+	}
+}
+
+func keystoreObservation(path, format string, entry parse.KeystoreEntry, f parse.LeafWithChain, info fs.FileInfo) Observation {
+	return Observation{
+		CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
+		ChainPEM:       parse.EncodePEM(f.Chain),
+		Source:         SourceJavaKeystore,
+		// The alias, not just the file. It is what `keytool -delete -alias`
+		// takes, and on a store with six aliases it is the only thing that
+		// says which one is expiring.
+		Location: path + ":" + entry.Alias,
+		Binding: map[string]string{
+			"keystore": path,
+			"alias":    entry.Alias,
+			"format":   format,
+		},
+		PrivateKeyPresent: entry.HasPrivateKey,
+		// The key is INSIDE the keystore, so the keystore is where an
+		// operator has to go — there is no separate file to point at.
+		PrivateKeyLocation: keyLocation(path, entry.HasPrivateKey),
+		FileMode:           fileMode(info),
+		FileOwner:          fileOwner(info),
+		ObservedAt:         time.Now().UTC(),
 	}
 }
 

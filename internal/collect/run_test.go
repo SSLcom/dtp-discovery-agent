@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,5 +120,61 @@ func TestAMisspeltSourceIsRefusedRatherThanIgnored(t *testing.T) {
 	}
 	if err := ValidateDisabled(Names()); err != nil {
 		t.Fatalf("every real source must be nameable: %v", err)
+	}
+}
+
+// One file can be hundreds of observations, so a run has a limit across every
+// source. Reaching it stops the run collecting, and it is not silent: the
+// source it happened in, and every source after it, is incomplete — so the
+// server marks nothing they missed as gone — and each says why.
+func TestARunStopsAtItsLimitAndSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		writeLeaf(t, filepath.Join(dir, fmt.Sprintf("site%d.pem", i)), fmt.Sprintf("site%d.example.com", i))
+	}
+	opts := Options{
+		File:      Bounds{Roots: []string{dir}},
+		Keystores: KeystoreBounds{Roots: []string{t.TempDir()}},
+		Disabled:  []string{SourceOSStore, SourceServerConfig, SourceListener},
+	}
+
+	for _, tc := range []struct {
+		name  string
+		limit *runCap
+	}{
+		{"by count", &runCap{maxCount: 3, maxBytes: MaxObservationBytesPerRun}},
+		// writeLeaf's certificates are a few hundred bytes of PEM each.
+		{"by size", &runCap{maxCount: MaxObservationsPerRun, maxBytes: 1500}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runWithin(context.Background(), opts, tc.limit)
+			if len(results) != 2 {
+				t.Fatalf("got %d results, want file and java_keystore", len(results))
+			}
+			files, keystores := results[0], results[1]
+
+			if n := len(files.Observations); n == 0 || n >= 5 {
+				t.Errorf("file reported %d of 5; want the run to stop part-way", n)
+			}
+			if files.Completed || len(files.Errors) != 1 || !strings.Contains(files.Errors[0].Error, "was not reported") {
+				t.Errorf("file: completed %v, errors %+v; want incomplete, with one error saying so", files.Completed, files.Errors)
+			}
+			if keystores.Completed || len(keystores.Errors) != 1 || !strings.Contains(keystores.Errors[0].Error, "was not run") {
+				t.Errorf("java_keystore: completed %v, errors %+v; want not run, and saying so", keystores.Completed, keystores.Errors)
+			}
+		})
+	}
+}
+
+// The real limit, untouched by a host with an ordinary number of certificates.
+func TestAnOrdinaryRunIsNotLimited(t *testing.T) {
+	dir := t.TempDir()
+	writeLeaf(t, filepath.Join(dir, "site.pem"), "www.example.com")
+	results := Run(context.Background(), Options{
+		File:     Bounds{Roots: []string{dir}},
+		Disabled: []string{SourceJavaKeystore, SourceOSStore, SourceServerConfig, SourceListener},
+	})
+	if len(results) != 1 || !results[0].Completed || len(results[0].Errors) != 0 || len(results[0].Observations) != 1 {
+		t.Errorf("results %+v", results)
 	}
 }

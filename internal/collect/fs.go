@@ -161,12 +161,15 @@ func (c *FS) walk(ctx context.Context, root string, b Bounds, res *Result, seen 
 		if err != nil || info.Size() > b.MaxFileBytes || info.Size() == 0 {
 			return nil
 		}
-		c.examine(path, info, res, examined)
+		c.examine(ctx, path, info, res, examined)
+		if runFull(ctx) {
+			return filepath.SkipAll
+		}
 		return nil
 	})
 }
 
-func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[string]bool) {
+func (c *FS) examine(ctx context.Context, path string, info fs.FileInfo, res *Result, examined map[string]bool) {
 	resolved, err := filepath.Abs(path)
 	if err != nil {
 		resolved = path
@@ -205,7 +208,10 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[st
 		keyPath = sibling
 	}
 
-	// The LEAF is the observation; the rest is its chain.
+	// EACH END-ENTITY CERTIFICATE is an observation, with only the issuers in
+	// the file that actually signed it as its chain. A file of several sites'
+	// certificates is several placements; reporting the first and sending the
+	// rest as its "chain" lost every other one.
 	//
 	// A file with no end-entity certificate in it is a TRUST STORE, not a
 	// deployment — ca-certificates.crt, a chain file on its own — and this walk
@@ -221,25 +227,37 @@ func (c *FS) examine(path string, info fs.FileInfo, res *Result, examined map[st
 	// a trust store is a list of issuers and has no key, while a certificate
 	// this machine holds the key for is one it can serve. Measured on a real
 	// scan, where a self-signed site certificate and its key sat in the same
-	// directory and the collector reported neither.
-	leaf, chain, found := parse.Leaf(parsed.Certificates)
-	if !found {
-		if keyPath == "" {
+	// directory and the collector reported neither. Then the FIRST certificate
+	// is the one reported, as it always was — there is no better way to tell
+	// which of several CA certificates the key belongs to without reading the
+	// key, which this collector never does — with its chain filtered the same
+	// way.
+	store := parse.NewStore(ctx, nil, parsed.Certificates)
+	found := store.Leaves()
+	if len(found) == 0 && keyPath != "" && !store.Shortfall().Interrupted {
+		first := parsed.Certificates[0]
+		found = []parse.LeafWithChain{{Leaf: first, Chain: store.ChainFor(first)}}
+	}
+	noteShortfall(res, SourceFile, path, store.Shortfall())
+	for _, f := range found {
+		recorded := res.observe(ctx, Observation{
+			CertificatePEM: parse.EncodePEM([]*x509.Certificate{f.Leaf}),
+			ChainPEM:       parse.EncodePEM(f.Chain),
+			Source:         SourceFile,
+			Location:       path,
+			// Said of every certificate in the file alike. Which of them the
+			// key belongs to would take reading the key, and the point is that
+			// a key is sitting here at this mode, whichever it opens.
+			PrivateKeyPresent:  keyPath != "",
+			PrivateKeyLocation: keyPath,
+			FileMode:           fileMode(info),
+			FileOwner:          fileOwner(info),
+			ObservedAt:         time.Now().UTC(),
+		})
+		if !recorded {
 			return
 		}
-		leaf, chain = parsed.Certificates[0], parsed.Certificates[1:]
 	}
-	res.Observations = append(res.Observations, Observation{
-		CertificatePEM:     parse.EncodePEM([]*x509.Certificate{leaf}),
-		ChainPEM:           parse.EncodePEM(chain),
-		Source:             SourceFile,
-		Location:           path,
-		PrivateKeyPresent:  keyPath != "",
-		PrivateKeyLocation: keyPath,
-		FileMode:           fileMode(info),
-		FileOwner:          fileOwner(info),
-		ObservedAt:         time.Now().UTC(),
-	})
 }
 
 // fileMode renders the permission bits as the octal a member expects: "0644".
