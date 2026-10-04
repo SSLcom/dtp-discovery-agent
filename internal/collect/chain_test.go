@@ -355,7 +355,6 @@ func TestAKeyEntrysFallbackChainShortfallIsNamed(t *testing.T) {
 	}
 }
 
-
 // A PKCS#12 keystore whose CA list carries another site's certificate and an
 // intermediate that did not issue this one.
 func TestAKeystoreEntryReportsEachLeafWithItsOwnChain(t *testing.T) {
