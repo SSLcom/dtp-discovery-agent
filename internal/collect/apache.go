@@ -2,8 +2,8 @@ package collect
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -303,40 +303,75 @@ func pairCertificates(certs, keys, chains []string) []certificateRef {
 	return refs
 }
 
-// isReadablePath rejects the values that are configuration rather than a file:
-// an nginx variable, a PKCS#11 URI, an inline data: certificate. The server
-// would not open them as files either, so reporting one as a missing
-// certificate would raise an alarm about a site that is working.
 // keyReference is what may be said about where a configured key is.
 //
 // Usually a path, and then the path itself. But both servers also take a key
 // that is not a file, and two of those forms ARE the secret: nginx's
 // `data:` carries the whole PEM key inline, and a PKCS#11 URI (RFC 7512) may
-// carry the token's PIN as `pin-value`. Copied verbatim, the first was caught
-// by the outbound guard — which refuses the whole request, so the host
-// reported nothing, every run — and the second was caught by nothing at all,
-// and sent a token PIN to the server. What an operator needs is that the key
-// is inline, or which token object holds it; never the secret.
+// carry the token's PIN as `pin-value`, or where to fetch it as `pin-source`.
+// Copied verbatim, the first was caught by the outbound guard — which refuses
+// the whole request, so the host reported nothing, every run — and the second
+// was caught by nothing at all, and sent a token PIN to the server. What an
+// operator needs is that the key is inline, or which token object holds it;
+// never the secret.
 func keyReference(value string) string {
-	if strings.HasPrefix(strings.ToLower(value), "data:") {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "data:") {
 		return "data: (inline in the configuration)"
 	}
-	if strings.Contains(strings.ToLower(value), "pkcs11:") {
-		return pinValue.ReplaceAllStringFunc(value, func(m string) string {
-			if m[0] == '?' {
-				return "?" // keep the query open for whatever follows
-			}
-			return ""
-		})
+	at := strings.Index(lower, "pkcs11:")
+	if at < 0 {
+		return value
 	}
-	return value
+	// The scheme, and whatever wraps it: nginx writes "engine:pkcs11:<uri>"
+	// and "store:<uri>", so the scheme can appear twice in a row.
+	head, rest := value[:at], value[at:]
+	for strings.HasPrefix(strings.ToLower(rest), "pkcs11:") {
+		head, rest = head+rest[:len("pkcs11:")], rest[len("pkcs11:"):]
+	}
+	// RFC 7512: path attributes up to the first "?", split on ";"; query
+	// attributes after it, split on "&".
+	path, query, hasQuery := strings.Cut(rest, "?")
+	out := head + withoutPins(path, ";")
+	if hasQuery {
+		if q := withoutPins(query, "&"); q != "" {
+			out += "?" + q
+		}
+	}
+	return out
 }
 
-// pinValue is a pin-value attribute with its separator, in the path or the
-// query of a PKCS#11 URI. A "?" that is left with an "&" behind it reads
-// oddly and harms nothing: this is a label, never opened.
-var pinValue = regexp.MustCompile(`(?i)[;?&]pin-value=[^;?&]*`)
+// withoutPins drops every pin-value and pin-source attribute from one part of
+// a PKCS#11 URI. The name is matched as the token library would read it:
+// percent-decoded and in any case. A name that will not decode is dropped if
+// it so much as mentions a pin, since it is a label here and never opened.
+func withoutPins(part, sep string) string {
+	var kept []string
+	for _, attr := range strings.Split(part, sep) {
+		if attr == "" {
+			continue
+		}
+		name, _, _ := strings.Cut(attr, "=")
+		decoded, err := url.PathUnescape(name)
+		if err != nil {
+			decoded = name
+		}
+		decoded = strings.ToLower(strings.TrimSpace(decoded))
+		if err != nil && strings.Contains(decoded, "pin") {
+			continue
+		}
+		if decoded == "pin-value" || decoded == "pin-source" {
+			continue
+		}
+		kept = append(kept, attr)
+	}
+	return strings.Join(kept, sep)
+}
 
+// isReadablePath rejects the values that are configuration rather than a file:
+// an nginx variable, a PKCS#11 URI, an inline data: certificate. The server
+// would not open them as files either, so reporting one as a missing
+// certificate would raise an alarm about a site that is working.
 func isReadablePath(value string) bool {
 	if value == "" || strings.ContainsAny(value, "$") {
 		return false

@@ -603,3 +603,62 @@ http {
 		}
 	}
 }
+
+// A PKCS#11 URI (RFC 7512) names its PIN wherever it likes: first, last, alone,
+// in the path (split on ";") or the query (split on "&"), with the attribute
+// name in any case or percent-encoded, and as `pin-source` — a file or command
+// that yields it, which is no better to hand over. Bugbot found the first case
+// slipping past a separator-anchored pattern. Every one must be gone, and what
+// names the token and object must survive, because that is what an operator
+// needs to find the key.
+func TestKeyReferenceDropsEveryPKCS11Pin(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"pkcs11:pin-value=1234;object=k", "pkcs11:object=k"},
+		{"pkcs11:object=k;pin-value=1234", "pkcs11:object=k"},
+		{"pkcs11:pin-value=1234", "pkcs11:"},
+		{"pkcs11:token=web;PIN-VALUE=1234;object=k", "pkcs11:token=web;object=k"},
+		{"pkcs11:token=web;pin%2dvalue=1234;object=k", "pkcs11:token=web;object=k"},
+		{"pkcs11:token=web;%70%69%6E-value=1234", "pkcs11:token=web"},
+		{"pkcs11:object=k?pin-value=1234", "pkcs11:object=k"},
+		{"pkcs11:object=k?module-name=softhsm2&pin-value=1234", "pkcs11:object=k?module-name=softhsm2"},
+		{"pkcs11:object=k?pin-value=1234&module-name=softhsm2", "pkcs11:object=k?module-name=softhsm2"},
+		{"pkcs11:object=k?pin-source=file:/etc/pin", "pkcs11:object=k"},
+		{"pkcs11:pin-source=%7Cprintpin;object=k", "pkcs11:object=k"},
+		{"pkcs11:object=k;Pin-Source=file:/etc/pin?pin-value=9", "pkcs11:object=k"},
+		// nginx's engine and store forms wrap the URI.
+		{"engine:pkcs11:pkcs11:pin-value=1234;object=site", "engine:pkcs11:pkcs11:object=site"},
+		{"store:pkcs11:pin-value=1234;object=site", "store:pkcs11:object=site"},
+		{"PKCS11:Pin-Value=1234;object=k", "PKCS11:object=k"},
+		// Nothing to drop, nothing changed.
+		{"pkcs11:token=web;object=k?module-name=softhsm2", "pkcs11:token=web;object=k?module-name=softhsm2"},
+		{"/etc/ssl/private/site.key", "/etc/ssl/private/site.key"},
+	} {
+		got := keyReference(tc.in)
+		if got != tc.want {
+			t.Errorf("keyReference(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if l := strings.ToLower(got); strings.Contains(l, "1234") || strings.Contains(l, "pin") && !strings.Contains(tc.want, "pin") {
+			t.Errorf("keyReference(%q) still carries the PIN: %q", tc.in, got)
+		}
+	}
+}
+
+// The same through Apache, which takes a PKCS#11 URI as SSLCertificateKeyFile
+// (mod_ssl 2.4.42+ with OpenSSL's engine or provider).
+func TestApacheKeyReferenceDropsThePin(t *testing.T) {
+	root := tree(t, map[string]string{
+		"apache2.conf": `
+<VirtualHost *:443>
+    ServerName hsm.example.com
+    SSLEngine on
+    SSLCertificateFile    {{root}}/ssl/hsm.pem
+    SSLCertificateKeyFile "pkcs11:pin-value=8675309;token=web;object=hsm"
+</VirtualHost>
+`,
+	})
+	writeLeaf(t, filepath.Join(root, "ssl/hsm.pem"), "hsm.example.com")
+	obs := onlyObservation(t, collectApache(t, root, "apache2.conf"))
+	if obs.PrivateKeyLocation != "pkcs11:token=web;object=hsm" {
+		t.Errorf("private_key_location = %q", obs.PrivateKeyLocation)
+	}
+}

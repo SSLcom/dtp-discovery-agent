@@ -97,7 +97,12 @@ func seedHost(t *testing.T) string {
 	}
 	site := "server {\n    listen 443 ssl;\n    server_name valid.e2e.invalid www.valid.e2e.invalid;\n" +
 		"    ssl_certificate     " + filepath.ToSlash(mk("ssl", "valid.pem")) + ";\n" +
-		"    ssl_certificate_key " + filepath.ToSlash(mk("ssl", "valid.key")) + ";\n}\n"
+		"    ssl_certificate_key " + filepath.ToSlash(mk("ssl", "valid.key")) + ";\n}\n" +
+		// A key held in a token, with its PIN written into the URI — first,
+		// percent-encoded and in the query — which must never leave the host.
+		"server {\n    listen 443 ssl;\n    server_name hsm.e2e.invalid;\n" +
+		"    ssl_certificate     " + filepath.ToSlash(mk("ssl", "valid.pem")) + ";\n" +
+		"    ssl_certificate_key \"engine:pkcs11:pkcs11:pin-value=" + e2ePin + ";token=web;Pin%2DSource=file:/etc/pin;object=hsm?pin-value=" + e2ePin + "\";\n}\n"
 	if err := os.WriteFile(mk("nginx", "sites-enabled", "site.conf"), []byte(site), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +121,9 @@ func seedHost(t *testing.T) string {
 	}
 	return root
 }
+
+// e2ePin is the token PIN written into the HSM vhost's key URI.
+const e2ePin = "8675309"
 
 // The sites in sites.pem, and the chain each must arrive with — by common name,
 // leaf side first.

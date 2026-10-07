@@ -115,6 +115,7 @@ func TestTheWholeThing(t *testing.T) {
 
 	assertFindings(t, obs, hostRoot)
 	assertNoKeyMaterialOnTheWire(t, server)
+	assertNoPinOnTheWire(t, server, obs)
 	assertEachPlacementOnce(t, obs)
 	assertEveryLeafInAFileIsReported(t, obs)
 
@@ -188,6 +189,32 @@ func assertNoKeyMaterialOnTheWire(t *testing.T, server *fakeDTP) {
 	for _, marker := range []string{"PRIVATE KEY", "BEGIN RSA PRIVATE", "BEGIN EC PRIVATE", "BEGIN ENCRYPTED"} {
 		if strings.Contains(wire, marker) {
 			t.Fatalf("KEY MATERIAL LEFT THE HOST: %q appears in a request body", marker)
+		}
+	}
+}
+
+// assertNoPinOnTheWire: the seeded nginx has a vhost whose key is a PKCS#11
+// URI carrying the token's PIN three ways. The vhost must arrive — naming the
+// token object, or this passes vacuously — and no PIN attribute, nor the PIN
+// itself, may appear anywhere in any request body.
+func assertNoPinOnTheWire(t *testing.T, server *fakeDTP, obs []observation) {
+	t.Helper()
+	seen := false
+	for _, o := range obs {
+		if strings.HasSuffix(o.Location, ":hsm.e2e.invalid") {
+			seen = true
+			if !strings.Contains(o.PrivateKeyLocation, "object=hsm") {
+				t.Errorf("the token key's location lost what names it: %q", o.PrivateKeyLocation)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("the HSM vhost was not reported; the PIN assertion would pass vacuously")
+	}
+	wire := strings.ToUpper(server.allBodies())
+	for _, marker := range []string{"PIN-VALUE", "PIN-SOURCE", "PIN%2DVALUE", "PIN%2DSOURCE", e2ePin} {
+		if strings.Contains(wire, marker) {
+			t.Fatalf("A TOKEN PIN LEFT THE HOST: %q appears in a request body", marker)
 		}
 	}
 }
@@ -322,6 +349,7 @@ func TestADirectoryNamedForKeysDoesNotSilenceTheHost(t *testing.T) {
 
 	obs := server.observations()
 	assertFindings(t, obs, hostRoot)
+	assertNoPinOnTheWire(t, server, obs)
 	found := false
 	for _, o := range obs {
 		if strings.Contains(filepath.ToSlash(o.Location), "Private Key Backups/old-site.pem") {
