@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildAgent compiles the binary under test. The binary, not the packages: a
@@ -114,6 +115,7 @@ func TestTheWholeThing(t *testing.T) {
 
 	assertFindings(t, obs, hostRoot)
 	assertNoKeyMaterialOnTheWire(t, server)
+	assertNoPinOnTheWire(t, server, obs)
 	assertEachPlacementOnce(t, obs)
 	assertEveryLeafInAFileIsReported(t, obs)
 
@@ -187,6 +189,32 @@ func assertNoKeyMaterialOnTheWire(t *testing.T, server *fakeDTP) {
 	for _, marker := range []string{"PRIVATE KEY", "BEGIN RSA PRIVATE", "BEGIN EC PRIVATE", "BEGIN ENCRYPTED"} {
 		if strings.Contains(wire, marker) {
 			t.Fatalf("KEY MATERIAL LEFT THE HOST: %q appears in a request body", marker)
+		}
+	}
+}
+
+// assertNoPinOnTheWire: the seeded nginx has a vhost whose key is a PKCS#11
+// URI carrying the token's PIN three ways. The vhost must arrive — naming the
+// token object, or this passes vacuously — and no PIN attribute, nor the PIN
+// itself, may appear anywhere in any request body.
+func assertNoPinOnTheWire(t *testing.T, server *fakeDTP, obs []observation) {
+	t.Helper()
+	seen := false
+	for _, o := range obs {
+		if strings.HasSuffix(o.Location, ":hsm.e2e.invalid") {
+			seen = true
+			if !strings.Contains(o.PrivateKeyLocation, "object=hsm") {
+				t.Errorf("the token key's location lost what names it: %q", o.PrivateKeyLocation)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("the HSM vhost was not reported; the PIN assertion would pass vacuously")
+	}
+	wire := strings.ToUpper(server.allBodies())
+	for _, marker := range []string{"PIN-VALUE", "PIN-SOURCE", "PIN%2DVALUE", "PIN%2DSOURCE", e2ePin} {
+		if strings.Contains(wire, marker) {
+			t.Fatalf("A TOKEN PIN LEFT THE HOST: %q appears in a request body", marker)
 		}
 	}
 }
@@ -289,5 +317,53 @@ func TestTheDefaultKeystoreRootsStillOverlap(t *testing.T) {
 		if !strings.Contains(src, root) {
 			t.Skipf("the default roots changed; %s is gone, so this no longer describes them", root)
 		}
+	}
+}
+
+// A NAME IS NOT A KEY. The outbound guard refuses a whole request, and it used
+// to match "private key" anywhere in the body — so this one directory, in a
+// scanned root, stopped the host reporting ANYTHING, every run (measured with
+// the v0.5.0 candidate: zero pages uploaded). The host is the ordinary seeded
+// one plus that directory; everything must still arrive, and still no key.
+func TestADirectoryNamedForKeysDoesNotSilenceTheHost(t *testing.T) {
+	server := newFakeDTP()
+	defer server.close()
+
+	hostRoot := seedHost(t)
+	odd := filepath.Join(hostRoot, "ssl", "Private Key Backups")
+	if err := os.MkdirAll(odd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeCert(t, filepath.Join(odd, "old-site.pem"), "", "old-site.e2e.invalid", false, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+
+	a := &agent{bin: buildAgent(t), state: t.TempDir(), host: hostRoot, t: t}
+	if out, err := a.run("enroll", "--server", server.url(), "--account", "acct-e2e", "--token", "dtpd_e2e"); err != nil {
+		t.Fatalf("enroll failed: %v\n%s", err, out)
+	}
+	patchConfig(t, a.state, hostRoot)
+	server.approve()
+	if out, err := a.run("run", "--once", "--without", "listener"); err != nil {
+		t.Fatalf("a directory's NAME stopped the report: %v\n%s", err, out)
+	}
+
+	obs := server.observations()
+	assertFindings(t, obs, hostRoot)
+	assertNoPinOnTheWire(t, server, obs)
+	found := false
+	for _, o := range obs {
+		if strings.Contains(filepath.ToSlash(o.Location), "Private Key Backups/old-site.pem") {
+			found = true
+		}
+		// The no-key assertion, held to the fields that carry certificates:
+		// the directory's name is in this body by design.
+		for _, field := range []string{o.CertificatePEM, o.ChainPEM} {
+			if strings.Contains(strings.ToUpper(field), "PRIVATE KEY") {
+				t.Fatalf("KEY MATERIAL LEFT THE HOST in %s", o.Location)
+			}
+		}
+	}
+	if !found {
+		t.Error("the certificate in the oddly named directory was not reported")
 	}
 }
