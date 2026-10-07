@@ -3,6 +3,7 @@ package collect
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -292,7 +293,7 @@ func pairCertificates(certs, keys, chains []string) []certificateRef {
 		}
 		ref := certificateRef{Certificate: cert}
 		if i < len(keys) {
-			ref.Key = keys[i]
+			ref.Key = keyReference(keys[i])
 		}
 		if i < len(chains) {
 			ref.Chain = chains[i]
@@ -306,6 +307,36 @@ func pairCertificates(certs, keys, chains []string) []certificateRef {
 // an nginx variable, a PKCS#11 URI, an inline data: certificate. The server
 // would not open them as files either, so reporting one as a missing
 // certificate would raise an alarm about a site that is working.
+// keyReference is what may be said about where a configured key is.
+//
+// Usually a path, and then the path itself. But both servers also take a key
+// that is not a file, and two of those forms ARE the secret: nginx's
+// `data:` carries the whole PEM key inline, and a PKCS#11 URI (RFC 7512) may
+// carry the token's PIN as `pin-value`. Copied verbatim, the first was caught
+// by the outbound guard — which refuses the whole request, so the host
+// reported nothing, every run — and the second was caught by nothing at all,
+// and sent a token PIN to the server. What an operator needs is that the key
+// is inline, or which token object holds it; never the secret.
+func keyReference(value string) string {
+	if strings.HasPrefix(strings.ToLower(value), "data:") {
+		return "data: (inline in the configuration)"
+	}
+	if strings.Contains(strings.ToLower(value), "pkcs11:") {
+		return pinValue.ReplaceAllStringFunc(value, func(m string) string {
+			if m[0] == '?' {
+				return "?" // keep the query open for whatever follows
+			}
+			return ""
+		})
+	}
+	return value
+}
+
+// pinValue is a pin-value attribute with its separator, in the path or the
+// query of a PKCS#11 URI. A "?" that is left with an "&" behind it reads
+// oddly and harms nothing: this is a label, never opened.
+var pinValue = regexp.MustCompile(`(?i)[;?&]pin-value=[^;?&]*`)
+
 func isReadablePath(value string) bool {
 	if value == "" || strings.ContainsAny(value, "$") {
 		return false

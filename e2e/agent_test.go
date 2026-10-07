@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildAgent compiles the binary under test. The binary, not the packages: a
@@ -289,5 +290,52 @@ func TestTheDefaultKeystoreRootsStillOverlap(t *testing.T) {
 		if !strings.Contains(src, root) {
 			t.Skipf("the default roots changed; %s is gone, so this no longer describes them", root)
 		}
+	}
+}
+
+// A NAME IS NOT A KEY. The outbound guard refuses a whole request, and it used
+// to match "private key" anywhere in the body — so this one directory, in a
+// scanned root, stopped the host reporting ANYTHING, every run (measured with
+// the v0.5.0 candidate: zero pages uploaded). The host is the ordinary seeded
+// one plus that directory; everything must still arrive, and still no key.
+func TestADirectoryNamedForKeysDoesNotSilenceTheHost(t *testing.T) {
+	server := newFakeDTP()
+	defer server.close()
+
+	hostRoot := seedHost(t)
+	odd := filepath.Join(hostRoot, "ssl", "Private Key Backups")
+	if err := os.MkdirAll(odd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeCert(t, filepath.Join(odd, "old-site.pem"), "", "old-site.e2e.invalid", false, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+
+	a := &agent{bin: buildAgent(t), state: t.TempDir(), host: hostRoot, t: t}
+	if out, err := a.run("enroll", "--server", server.url(), "--account", "acct-e2e", "--token", "dtpd_e2e"); err != nil {
+		t.Fatalf("enroll failed: %v\n%s", err, out)
+	}
+	patchConfig(t, a.state, hostRoot)
+	server.approve()
+	if out, err := a.run("run", "--once", "--without", "listener"); err != nil {
+		t.Fatalf("a directory's NAME stopped the report: %v\n%s", err, out)
+	}
+
+	obs := server.observations()
+	assertFindings(t, obs, hostRoot)
+	found := false
+	for _, o := range obs {
+		if strings.Contains(filepath.ToSlash(o.Location), "Private Key Backups/old-site.pem") {
+			found = true
+		}
+		// The no-key assertion, held to the fields that carry certificates:
+		// the directory's name is in this body by design.
+		for _, field := range []string{o.CertificatePEM, o.ChainPEM} {
+			if strings.Contains(strings.ToUpper(field), "PRIVATE KEY") {
+				t.Fatalf("KEY MATERIAL LEFT THE HOST in %s", o.Location)
+			}
+		}
+	}
+	if !found {
+		t.Error("the certificate in the oddly named directory was not reported")
 	}
 }

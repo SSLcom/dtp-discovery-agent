@@ -7,11 +7,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,6 +223,113 @@ func TestKeyMaterialIsRefusedBeforeItLeavesTheProcess(t *testing.T) {
 	if reached {
 		t.Fatal("the request reached the network; the guard must stop it locally")
 	}
+}
+
+// THE WORDS ARE NOT THE KEY. Paths, aliases, server names and error text come
+// from the host, and "private key" is an ordinary thing to call a directory or
+// a keystore alias. Up to v0.5.0 the guard matched those two words anywhere in
+// the body, so one directory named "Private Key Backups" in a scanned root —
+// or a keystore alias "server private key" — refused EVERY page of EVERY run on
+// that host, leaving its whole inventory unreported for as long as the name
+// stayed. Measured with the shipped binary: one such directory, zero pages.
+func TestNamesThatMentionPrivateKeysAreNotKeyMaterial(t *testing.T) {
+	reached := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached++
+		_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "r"})
+	}))
+	defer server.Close()
+
+	cert := testCertificatePEM(t)
+	_, err := New(server.URL, "t").Inventory(context.Background(), InventoryPage{
+		RunID: "run-names",
+		Observations: []collect.Observation{
+			{CertificatePEM: cert, ChainPEM: cert, Source: "file",
+				Location:           "/srv/Private Key Backups/site.pem",
+				PrivateKeyPresent:  true,
+				PrivateKeyLocation: "/etc/ssl/private key.pem"},
+			{CertificatePEM: cert, Source: "java_keystore",
+				Location: "/opt/app/keystore.jks:server private key",
+				Binding:  map[string]string{"alias": "server private key"}},
+		},
+		CollectorErrors: []collect.Error{{Collector: "java_keystore", Location: "/opt/app/k.jks",
+			Error: `entry "old private key": unexpected end of data`}},
+	})
+	if err != nil {
+		t.Fatalf("a page whose NAMES mention a private key must be sent: %v", err)
+	}
+	if reached != 1 {
+		t.Fatalf("the server received %d requests, want 1", reached)
+	}
+}
+
+// What the guard is FOR still holds in every field: real key material is
+// refused locally, in a certificate field, in a chain field, and in a field that
+// has no business carrying PEM at all — the "future field" the guard exists for.
+func TestKeyMaterialIsRefusedInAnyField(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalECPrivateKey(key)
+	leaked := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
+	// Truncated: pem.Decode rejects it, but it is still a key's text. In a PEM
+	// field that is refused; the substring rule still applies THERE.
+	truncated := leaked[:len(leaked)/2]
+	pkcs8, _ := x509.MarshalPKCS8PrivateKey(key)
+	cert := testCertificatePEM(t)
+
+	for name, obs := range map[string]collect.Observation{
+		"certificate":           {CertificatePEM: leaked, Source: "file", Location: "/x"},
+		"chain":                 {CertificatePEM: cert, ChainPEM: cert + leaked, Source: "file", Location: "/x"},
+		"truncated in chain":    {CertificatePEM: cert, ChainPEM: cert + truncated, Source: "file", Location: "/x"},
+		"location":              {CertificatePEM: cert, Source: "file", Location: "/x/" + leaked},
+		"key location":          {CertificatePEM: cert, Source: "file", Location: "/x", PrivateKeyLocation: leaked},
+		"binding":               {CertificatePEM: cert, Source: "file", Location: "/x", Binding: map[string]string{"note": leaked}},
+		"pkcs8 in a binding":    {CertificatePEM: cert, Source: "file", Location: "/x", Binding: map[string]string{"note": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))}},
+		"lowercase armor label": {CertificatePEM: cert, Source: "file", Location: "/x", Binding: map[string]string{"note": strings.ReplaceAll(leaked, "EC PRIVATE KEY", "ec private key")}},
+		"a binding's KEY":       {CertificatePEM: cert, Source: "file", Location: "/x", Binding: map[string]string{leaked: "x"}},
+		"truncated armor":       {CertificatePEM: cert, Source: "file", Location: "/x/" + strings.TrimSuffix(strings.SplitN(leaked, "\n", 2)[0], "-----")},
+		"RFC 4716 armor":        {CertificatePEM: cert, Source: "file", Location: "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nAAAA"},
+		"unicode dashes":        {CertificatePEM: cert, Source: "file", Location: strings.ReplaceAll(leaked, "-", "\u2010")},
+		"no-break space":        {CertificatePEM: cert, Source: "file", Location: strings.ReplaceAll(leaked, "PRIVATE KEY", "PRIVATE\u00a0KEY")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reached := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "r"})
+			}))
+			defer server.Close()
+
+			_, err := New(server.URL, "t").Inventory(context.Background(), InventoryPage{
+				RunID: "run-leak", Observations: []collect.Observation{obs},
+			})
+			if err == nil || !strings.Contains(err.Error(), "private key material") {
+				t.Fatalf("want the guard's refusal, got %v", err)
+			}
+			if reached {
+				t.Fatal("the request reached the network")
+			}
+		})
+	}
+	// And in a collector error, which is free text too.
+	_, err := New("http://127.0.0.1:0", "t").Inventory(context.Background(), InventoryPage{
+		RunID:           "run-leak",
+		CollectorErrors: []collect.Error{{Collector: "file", Error: "read: " + leaked}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "private key material") {
+		t.Fatalf("a key in a collector error must be refused, got %v", err)
+	}
+}
+
+func testCertificatePEM(t *testing.T) string {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "guard.invalid"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 // ── assertion ────────────────────────────────────────────────────────────────

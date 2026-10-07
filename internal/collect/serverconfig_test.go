@@ -549,3 +549,57 @@ func TestABackslashIsOnlyAnEscapeWhereItMeansSomething(t *testing.T) {
 		})
 	}
 }
+
+// A KEY THAT IS NOT A FILE IS NOT A LOCATION. nginx 1.15.10+ takes a key
+// inline — `ssl_certificate_key "data:-----BEGIN PRIVATE KEY-----…"` — and a
+// PKCS#11 URI can carry the token's PIN in `pin-value`. Both used to be copied
+// verbatim into private_key_location: the inline key was then caught by the
+// outbound guard, which refused the whole run, so the host reported nothing
+// ever again (red team, measured); the PIN was not caught by anything, and
+// went to the server. What an operator needs is that the key is inline or in
+// a token, and which token object — never the secret itself.
+func TestAKeyReferenceNeverCarriesTheSecret(t *testing.T) {
+	inline := "data:-----BEGIN PRIVATE KEY-----\\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\\n-----END PRIVATE KEY-----"
+	root := tree(t, map[string]string{
+		"nginx.conf": `
+http {
+    server {
+        server_name inline.example.com;
+        ssl_certificate     {{root}}/inline.pem;
+        ssl_certificate_key "` + inline + `";
+    }
+    server {
+        server_name token.example.com;
+        ssl_certificate     {{root}}/token.pem;
+        ssl_certificate_key "engine:pkcs11:pkcs11:token=web;object=site?pin-value=271828";
+    }
+    server {
+        server_name uri.example.com;
+        ssl_certificate     {{root}}/uri.pem;
+        ssl_certificate_key "pkcs11:token=web;object=uri;pin-value=314159";
+    }
+}
+`,
+	})
+	for _, name := range []string{"inline", "token", "uri"} {
+		writeLeaf(t, filepath.Join(root, name+".pem"), name+".example.com")
+	}
+
+	res := collectNginx(t, root, "nginx.conf")
+	if len(res.Observations) != 3 {
+		t.Fatalf("want 3 observations, got %d: %v", len(res.Observations), res.Errors)
+	}
+	for _, obs := range res.Observations {
+		if !obs.PrivateKeyPresent {
+			t.Errorf("%s: a configured key is still a key", obs.Location)
+		}
+		for _, secret := range []string{"BEGIN", "MIGHAgEA", "271828", "314159", "pin-value"} {
+			if strings.Contains(obs.PrivateKeyLocation, secret) {
+				t.Errorf("%s: private_key_location carries %q: %q", obs.Location, secret, obs.PrivateKeyLocation)
+			}
+		}
+		if obs.PrivateKeyLocation == "" {
+			t.Errorf("%s: say WHERE the key is, even when that is not a file", obs.Location)
+		}
+	}
+}
